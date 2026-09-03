@@ -27,24 +27,36 @@ uv run stockml run       --config configs/step1.yaml   # walk-forward, writes ru
 uv run stockml report    runs/<ts>_<name>/              # pretty-print the table + baselines + warnings
 uv run stockml leakcheck runs/<ts>_<name>/               # leak diagnostics on demand
 
+# step 1.5: evolutionary search (see below)
+uv run stockml evolve         --config configs/evo.yaml [--quick] [--resume PATH]
+uv run stockml evolve-control --config configs/evo.yaml --kind random [--run-dir PATH]
+uv run stockml evolve-control --config configs/evo.yaml --kind null   [--run-dir PATH]
+uv run stockml vault           runs/evo_<ts>_<name>/
+uv run stockml lineage          runs/evo_<ts>_<name>/ --id <individual>
+uv run stockml evo-report        runs/evo_<ts>_<name>/
+
 uv run pytest -q
 ```
 
-Use `configs/smoke.yaml` (10 tickers, ~2 years) for fast iteration — it runs
-end to end in well under a minute once prices are cached.
+Use `configs/smoke.yaml` (10 tickers, ~2 years) for fast step-1 iteration,
+and `evolve --quick` (20 tickers, 6 genomes, 3 generations) for fast
+evolution iteration — both run in well under a minute per generation once
+prices are cached.
 
 ## How the pipeline fits together
 
 ```
-data.py      download + cache OHLCV per ticker (parquet), align to the union trading calendar
-labels.py    per-ticker up/down/stagnant labels from a volatility-scaled band
-features.py  per-ticker past-only features (imports labels.rolling_sigma -- one implementation)
-split.py     walk-forward train/test/sanity split by date, asserted at runtime, 1-day train/test embargo
-models/      Model protocol; MajorityClass/AlwaysUp baselines; LogReg/HGB (boring, untuned)
-update.py    UpdatePolicy protocol + Frozen (step-2 hook; the loop calls it every test day)
-evaluate.py  metrics, per-ticker/per-class breakdowns, day-level significance test, leak diagnostics
-run.py       orchestrates all of the above, writes runs/<ts>_<name>/
-backtest/    Policy + Reward protocol stubs only (step-3 hook)
+data.py         download + cache OHLCV per ticker (parquet), align to the union trading calendar
+labels.py       per-ticker up/down/stagnant labels from a volatility-scaled band
+features.py     per-ticker past-only features (imports labels.rolling_sigma -- one implementation)
+split.py        walk-forward train/test/sanity split by date, asserted at runtime, 1-day train/test embargo
+walk_forward.py the fit/predict-day-by-day loop, shared by run.py and evolution/fitness.py
+models/         Model protocol; MajorityClass/AlwaysUp baselines; LogReg/HGB (boring, untuned)
+update.py       UpdatePolicy protocol + Frozen (step-2 hook; the loop calls it every test day)
+evaluate.py     metrics, per-ticker/per-class breakdowns, day-level significance test, leak diagnostics
+evolution/      step 1.5: genetic search over (features x model x hyperparams) genomes -- see below
+run.py          orchestrates step 1, writes runs/<ts>_<name>/
+backtest/       Policy + Reward protocol stubs only (step-3 hook)
 ```
 
 ## Known, accepted limitations (step 1)
@@ -97,8 +109,23 @@ backtest/    Policy + Reward protocol stubs only (step-3 hook)
 ## Step-1 results: full S&P 500, 2010-01-01 → 2026-09-03
 
 `configs/step1.yaml`, pooled model, `train_years: 3`, `k: 0.5`, `vol_window: 20`,
-`embargo_days: 1`. 483 of 503 tickers survived the `min_history_days: 1000`
-filter (20 too short — younger listings, mostly). Run: `runs/20260903_005859_step1/`.
+`embargo_days: 1`. 493 of 503 tickers survived the `min_history_days: 1000`
+filter (10 too short — young listings/spinoffs: GEHC, GEV, KVUE, RDDT, SOLV,
+VLTO, etc.). Run: `runs/20260903_172551_step1/`.
+
+> **Corrected numbers.** An earlier version of this table (`runs/20260903_005859_step1/`)
+> was built on a `load_panel` bug: it never sliced each ticker's cached
+> parquet to `data.start`/`data.end`, so a ticker's dataset was silently
+> whatever date range happened to be on disk rather than what the config
+> asked for. In practice this meant **AAPL, MSFT, AMZN, GOOGL, JPM, XOM,
+> JNJ, PG, KO, and WMT — ten S&P 500 blue chips — were silently excluded**
+> from that run: their cache had only ever been widened for `smoke.yaml`
+> (start `2024-09-01`), so under the bug they were loaded with under a year
+> of history, failed the `min_history_days: 1000` filter, and were dropped
+> with no warning distinguishing them from a genuine short-history ticker.
+> Fixed by having `load_panel` slice each ticker's cached frame to
+> `[start, end]` before alignment (`data.py`); the table below is the
+> re-run with all ten correctly included.
 
 **Class balance** (train / test, both healthy — no warning fired):
 
@@ -107,15 +134,15 @@ filter (20 too short — younger listings, mostly). Run: `runs/20260903_005859_s
 | train | 26.9% | 42.5% | 30.5% |
 | test  | 26.3% | 43.4% | 30.3% |
 
-**Test set: 1,565,941 rows, 3,347 trading days** (pooled across all tickers,
+**Test set: 1,599,411 rows, 3,347 trading days** (pooled across all tickers,
 walk-forward, one model frozen after the initial 3-year train window):
 
 | model | accuracy | balanced acc. | macro F1 |
 |---|---|---|---|
-| always_up | 0.3030 | 0.3333 | 0.1550 |
-| majority_class | 0.4338 | 0.3333 | 0.2017 |
-| logreg | 0.4363 | 0.3486 | 0.2646 |
-| hgb | 0.4346 | 0.3582 | 0.3015 |
+| always_up | 0.3031 | 0.3333 | 0.1551 |
+| majority_class | 0.4337 | 0.3333 | 0.2017 |
+| logreg | 0.4363 | 0.3485 | 0.2642 |
+| hgb | 0.4345 | 0.3583 | 0.3018 |
 
 **Day-level paired test vs. majority baseline** — the honest significance
 test (see "Two design details worth knowing about" above): one observation
@@ -123,37 +150,97 @@ per trading day, not per row.
 
 | model | mean daily edge | t-test p-value | 95% CI (block bootstrap) |
 |---|---|---|---|
-| always_up | −13.080pp | 1.0 | [−14.083, −12.056]pp |
-| logreg | **+0.251pp** | **0.0102** | **[+0.052, +0.495]pp** |
-| hgb | +0.085pp | 0.2496 | [−0.196, +0.398]pp |
+| always_up | −13.065pp | 1.0 | [−14.055, −12.042]pp |
+| logreg | **+0.258pp** | **0.0082** | **[+0.057, +0.503]pp** |
+| hgb | +0.084pp | 0.2550 | [−0.192, +0.406]pp |
 
 This is the more interesting result than the headline accuracy table: at the
 row level, both logreg and HGB looked "significant" (p < 0.01). At the
 *day* level — the actual unit of independence — **logreg's edge survives
-(barely): a real but tiny ~0.25 point/day advantage. HGB's does not**: its
-day-level p-value is 0.25, indistinguishable from noise, and its per-year
+(barely): a real but tiny ~0.26 point/day advantage. HGB's does not**: its
+day-level p-value is 0.255, indistinguishable from noise, and its per-year
 edge is negative in 5 of the last 5 years (2022–2026, see `report.txt`).
 The row-level test would have told you both models "worked"; it doesn't
 survive contact with the actual number of independent trading days.
 
-**Sanity slice** (final 10 trading days — 4,349 rows, not merged into the
+**Sanity slice** (final 10 trading days — 4,521 rows, not merged into the
 table above, not statistically meaningful on its own, exists only to prove
 the pipeline runs on the freshest data):
 
 | model | accuracy |
 |---|---|
-| always_up | 0.2102 |
-| majority_class | 0.4794 |
-| logreg | 0.4737 |
-| hgb | 0.4560 |
+| always_up | 0.2134 |
+| majority_class | 0.4787 |
+| logreg | 0.4727 |
+| hgb | 0.4534 |
 
 **Reading this honestly**: no leak alarm fired (max accuracy 43.6%, nowhere
 near the 60% threshold). `stockml leakcheck` was run on this exact result as
 a final check: the label-alignment audit and the truncation test (rebuilding
 features from data truncated at each sampled day) both came back with **0
 mismatches**, and the shift test (staling every feature by one extra day)
-dropped accuracy only slightly rather than collapsing to baseline — so
-logreg's small edge looks real, not leaked. It's also modest enough, and
-close enough to the honest baseline, that step 1 did its job: it didn't hand
-back a suspiciously good number to chase down, and the day-level test caught
-a case (HGB) where the row-level number would have.
+dropped accuracy only slightly (hgb −0.0043, logreg −0.0027) rather than
+collapsing to baseline — so logreg's small edge looks real, not leaked. It's
+also modest enough, and close enough to the honest baseline, that step 1 did
+its job: it didn't hand back a suspiciously good number to chase down, and
+the day-level test caught a case (HGB) where the row-level number would
+have. The corrected universe (ten more, and more liquid, tickers) barely
+moved these numbers — the framework's conclusion doesn't hinge on the bug.
+
+## Step 1.5: evolutionary search
+
+`src/stockml/evolution/` adds a genetic-algorithm search over discrete
+(features x model family x hyperparameters) genomes on top of step 1. Full
+design rationale — the three time zones, the vault protocol, the two
+controls, the RNG/reproducibility scheme, the fitness-loop bootstrap-cost
+tradeoff — is in `CLAUDE.md`'s "Evolutionary search (step 1.5)" section.
+Short version:
+
+- **The question this answers is not "can evolution find a good model."**
+  It's **"does evolution find anything random search and pure luck don't?"**
+- **Same exam for everyone**: one canonical majority-class baseline per run;
+  a genome picks what it looks at and how it learns, never what it's judged
+  on.
+- **Three zones**: `train` (fit here) -> `arena` (fitness measured here,
+  thousands of times — evolution *will* overfit to it) -> `vault` (never
+  touched during evolution; opened exactly once, for a fixed pre-declared
+  list of individuals, guarded by the run's own `progress.json`).
+- **Two controls, same budget**: random search (same number of unique
+  fitness evaluations, uniformly random genomes) and a shifted-label null
+  (the identical evolution run on labels circularly shifted >= 250 trading
+  days per ticker — the luck ceiling).
+- **A vault result is never a reason to change the config and run again.**
+  Every look is permanently logged to `runs/evolution/vault_log.jsonl`.
+
+### Mechanism sanity check (`--quick`, 20 tickers, 6 genomes, 3 generations)
+
+This is **not** the real answer — it's a fast, small run whose only purpose
+is to prove the machinery produces the qualitatively right ordering before
+committing a night to the real `configs/evo.yaml` run. It does:
+
+| | arena fitness (mean edge - 1 SE, points/day) |
+|---|---|
+| evolution's champion | +0.4312 |
+| random search's champion (same budget: 16 evals) | +0.0436 |
+| shifted-label null's champion (luck ceiling) | +0.0077 |
+
+Evolution's champion clearly beats random search, which clearly beats the
+null — exactly the honest picture the harness is built to surface (or fail
+to surface) at real scale. On this toy run the champion happens to be the
+seeded `SEED_LOGREG` individual itself (unsurprising with 20 tickers and 3
+generations); whether evolution actually discovers something *better* than
+the step-1 seeds is precisely the open question the real overnight run
+(`configs/evo.yaml`, `population_size: 40`, `generations: 25`, full S&P 500)
+is for.
+
+### A bug the `--quick` run caught before it could waste a night
+
+Running genomes in parallel was initially measured to be *slower* than
+serial: `HistGradientBoostingClassifier` spawns its own internal thread
+pool, so N outer `joblib` threads each also fitting an internally
+multithreaded model oversubscribed the machine's cores into thrashing (16
+genomes: ~3.3 min serial vs. not finishing in 10 min "parallel"). Fixed with
+`threadpoolctl.threadpool_limits(1)` around every parallel dispatch site —
+already a scikit-learn dependency, no new one added. This is exactly why
+`--quick` exists: catching this on a 3-minute run instead of during a
+population-40/generations-25/full-S&P-500 overnight run.

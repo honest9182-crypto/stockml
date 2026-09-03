@@ -12,6 +12,7 @@ unless `refresh=True`.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -52,6 +53,76 @@ def _cache_path(cache_dir: Path, ticker: str) -> Path:
     return cache_dir / f"{ticker}.parquet"
 
 
+def _meta_path(cache_dir: Path, ticker: str) -> Path:
+    return cache_dir / f"{ticker}.meta.json"
+
+
+def _read_earliest_requested_start(meta_path: Path) -> pd.Timestamp | None:
+    if not meta_path.exists():
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return pd.Timestamp(meta["earliest_requested_start"])
+    except Exception:
+        return None
+
+
+def _write_earliest_requested_start(meta_path: Path, requested_start: pd.Timestamp) -> None:
+    prior = _read_earliest_requested_start(meta_path)
+    earliest = min(prior, requested_start) if prior is not None else requested_start
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump({"earliest_requested_start": earliest.strftime("%Y-%m-%d")}, f)
+
+
+def _cache_needs_refresh(
+    path: Path, requested_start: pd.Timestamp, tolerance_days: int = 7, meta_path: Path | None = None
+) -> bool:
+    """True if `path` doesn't exist, is unreadable, or doesn't cover
+    `requested_start` (within a small weekend/holiday tolerance) -- unless
+    `meta_path` records that a request for this-or-an-earlier start was
+    already made and this is genuinely all the history available.
+
+    A file existing is not enough: a ticker first cached by a run with a
+    short date range (e.g. `smoke.yaml`, start=2024) must not silently stay
+    stuck at that range forever just because a later run with a longer
+    range (e.g. `step1.yaml`, start=2010) finds a file already there and
+    treats "exists" as "already have what I need" -- that would silently
+    make a config-driven run's actual data depend on unrelated prior runs,
+    violating reproducibility (CLAUDE.md principle 4).
+
+    But the flip side bites just as hard: a ticker whose real trading
+    history starts after `requested_start` (e.g. an IPO in 2012 with
+    `start=2010`) can *never* satisfy that coverage check, so without the
+    `meta_path` escape hatch it would be re-fetched from the live API on
+    *every* run forever -- and a live API is not guaranteed to return
+    byte-identical data on two separate calls (observed directly: two
+    `evolve --quick` runs with the same seed produced different fitness for
+    the identical genome, traced to this). `meta_path` remembers "we already
+    asked for start=X and this is what we got" so a repeat (or narrower)
+    request doesn't re-hit the network at all.
+    """
+    if not path.exists():
+        return True
+    try:
+        cached = pd.read_parquet(path, columns=["close"])
+    except Exception:
+        return True
+    if cached.empty:
+        return True
+    cached_start = pd.to_datetime(cached.index).min()
+    # NOTE: pd.Timedelta(days=N) triggers a numpy-unit DeprecationWarning on
+    # this pandas/numpy combination; pd.Timedelta(N, unit="D") does not.
+    covers_request = cached_start <= (requested_start + pd.Timedelta(tolerance_days, unit="D"))
+    if covers_request:
+        return False
+    if meta_path is not None:
+        earliest_tried = _read_earliest_requested_start(meta_path)
+        if earliest_tried is not None and requested_start >= earliest_tried:
+            return False  # already asked for this (or an earlier) start; no new info to get
+    return True
+
+
 def download_prices(
     tickers: list[str],
     start: str,
@@ -76,8 +147,12 @@ def download_prices(
 
     report = DownloadReport()
     to_fetch = []
+    requested_start = pd.Timestamp(start)
     for t in tickers:
-        if not refresh and _cache_path(cache_dir, t).exists():
+        needs_refresh = refresh or _cache_needs_refresh(
+            _cache_path(cache_dir, t), requested_start, meta_path=_meta_path(cache_dir, t)
+        )
+        if not needs_refresh:
             report.cached.append(t)
         else:
             to_fetch.append(t)
@@ -110,10 +185,14 @@ def download_prices(
 
         for t in batch:
             try:
-                if len(batch) == 1:
-                    tdf = data
-                else:
+                # yfinance returns a (ticker, field) MultiIndex-columned frame
+                # for group_by="ticker" regardless of batch size -- including
+                # a batch of one -- so single-ticker batches must be unwrapped
+                # the same way multi-ticker ones are, not treated as already flat.
+                if isinstance(data.columns, pd.MultiIndex):
                     tdf = data[t] if t in data.columns.get_level_values(0) else None
+                else:
+                    tdf = data
                 if tdf is None or tdf.empty:
                     report.failed.append(t)
                     continue
@@ -125,6 +204,7 @@ def download_prices(
                     continue
                 tdf.index.name = "date"
                 tdf.to_parquet(_cache_path(cache_dir, t))
+                _write_earliest_requested_start(_meta_path(cache_dir, t), requested_start)
                 report.ok.append(t)
             except Exception as e:  # noqa: BLE001
                 logger.warning("failed to cache %s: %s", t, e)
@@ -141,7 +221,7 @@ def _load_one(cache_dir: Path, ticker: str) -> pd.DataFrame | None:
         return None
     df = pd.read_parquet(p)
     df.index = pd.to_datetime(df.index)
-    return df
+    return df.sort_index()  # load_panel's date-range .loc slicing needs a monotonic index
 
 
 @dataclass
@@ -157,15 +237,27 @@ def load_panel(
     tickers: list[str],
     cache_dir: str | Path,
     min_history_days: int = 1000,
+    start: str | pd.Timestamp | None = None,
+    end: str | pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, PanelReport]:
     """Build a long panel (date, ticker, open, high, low, close, volume).
 
-    Aligns to the union trading calendar across all cached tickers. Drops a
-    ticker-day when close is missing. Drops tickers with fewer than
+    Each ticker's cached frame is first sliced to `[start, end]` -- the cache
+    on disk is keyed only by ticker, not by the requesting config's date
+    range, and `download_prices`/`_cache_needs_refresh` deliberately let a
+    cache file cover *more* history than the current request (that's the
+    whole point of the earliest-requested-start bookkeeping there). Without
+    slicing here, a config's actual date range would silently depend on
+    whatever the widest prior request for that ticker happened to be, not on
+    its own `data.start`/`data.end` (CLAUDE.md principle 4: reproducible).
+    Then aligns to the union trading calendar across all cached tickers.
+    Drops a ticker-day when close is missing. Drops tickers with fewer than
     `min_history_days` remaining rows.
     """
     cache_dir = Path(cache_dir)
     report = PanelReport(n_tickers_in=len(tickers))
+    start_ts = pd.Timestamp(start) if start is not None else None
+    end_ts = pd.Timestamp(end) if end is not None else None
 
     frames: dict[str, pd.DataFrame] = {}
     for t in tickers:
@@ -173,6 +265,8 @@ def load_panel(
         if df is None:
             report.dropped_missing_cache.append(t)
             continue
+        if start_ts is not None or end_ts is not None:
+            df = df.loc[start_ts:end_ts]
         frames[t] = df
 
     if not frames:
