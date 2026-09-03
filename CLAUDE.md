@@ -14,7 +14,12 @@ take the slow route and say so.
 
 1. **No look-ahead, ever.** Every feature at row `t` uses only data with a
    timestamp `<= t`. The label at row `t` is the only thing allowed to touch
-   `t+1`. Time-based splits only; never a random split of days.
+   `t+1`. Time-based splits only; never a random split of days. This is why
+   `split.py` embargoes (drops) the last training day by default
+   (`embargo_days: 1`): that row's *label* is `r_next` computed from the
+   first test day's close, so training on it directly touches test-period
+   information -- feature-side care (shift tests, truncation tests) would
+   never catch this, because it's the label doing the leaking, not a feature.
 2. **Baselines are mandatory.** Every results table shows the model next to
    `majority-class` and `always-up` baselines computed on the *same* test
    rows. A number without its baseline is not a result.
@@ -27,6 +32,36 @@ take the slow route and say so.
 5. **Simple over clever.** No deep learning, no hyperparameter search, no
    feature engineering beyond the documented list. Minimal dependencies. The
    model is deliberately boring; the harness is the deliverable.
+
+## Statistical honesty: day-level vs. row-level significance
+
+A naive significance test treats every (ticker, day) row in the test set as
+an independent trial. It isn't: on any single day, all ~500 tickers are
+exposed to the same market-wide news and mostly move together, so their
+correctness/incorrectness on that day is correlated, not independent. A
+row-level test (e.g. a binomial test over hit/miss rows) therefore behaves
+as if the test set had orders of magnitude more independent observations
+than it really does -- with ~500 tickers x ~3000 test days that's the
+difference between treating the sample size as ~1.5 million versus ~3000. The
+row-level p-value comes out far smaller (far more "significant") than the
+data actually supports.
+
+`evaluate.py` computes both, on purpose:
+
+- `binomial_test_vs_baseline` — the row-level test. Kept in `metrics.json`
+  under the key `row_level_overstated` so it's there for comparison, but
+  never shown in `report.txt` and never the number to trust.
+- `day_level_paired_test` — the honest version. The unit of analysis is one
+  number per trading day (that day's pooled accuracy, model vs. majority
+  baseline), so the sample size is the number of independent-ish trading
+  days, not the number of rows. It reports the mean daily edge in
+  percentage points, a one-sided paired t-test of that edge against zero,
+  and a 20-day block-bootstrap 95% CI (block, not i.i.d., because
+  consecutive trading days are themselves autocorrelated -- an i.i.d.
+  bootstrap over days would repeat the same overstatement one level up).
+
+If you add a new significance test, ask what the *actual* unit of
+independence is before trusting its p-value.
 
 ## Repo layout
 

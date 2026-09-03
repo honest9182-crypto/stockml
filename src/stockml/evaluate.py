@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.stats import binomtest
+from scipy.stats import binomtest, ttest_1samp
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -80,8 +80,18 @@ def per_ticker_summary(
 
 
 # ---------------------------------------------------------------------------
-# Rolling accuracy
+# Daily / rolling accuracy
 # ---------------------------------------------------------------------------
+
+
+def daily_accuracy(date: pd.Series, y_true: pd.Series, y_pred: pd.Series) -> pd.Series:
+    """Pooled-across-tickers accuracy per calendar date, sorted by date.
+
+    This is the unit of analysis for the day-level significance test below:
+    one number per trading day, not one per (ticker, day) row.
+    """
+    correct = (y_true.to_numpy() == y_pred.to_numpy()).astype(float)
+    return pd.Series(correct, index=pd.to_datetime(date)).groupby(level=0).mean().sort_index()
 
 
 def rolling_accuracy_series(
@@ -90,9 +100,22 @@ def rolling_accuracy_series(
     """Pooled-across-tickers accuracy per date, then a rolling mean over `window`
     trading days -- so a lucky stretch shows up visibly as a stretch, not a headline number.
     """
-    correct = (y_true.to_numpy() == y_pred.to_numpy()).astype(float)
-    daily = pd.Series(correct, index=pd.to_datetime(date)).groupby(level=0).mean().sort_index()
+    daily = daily_accuracy(date, y_true, y_pred)
     return daily.rolling(window=window, min_periods=max(1, window // 3)).mean()
+
+
+# ---------------------------------------------------------------------------
+# Prediction mix
+# ---------------------------------------------------------------------------
+
+
+def prediction_mix(y_pred: pd.Series) -> dict[str, float]:
+    """Share of each class the model actually predicted (not the true labels).
+    Surfaces a model that, say, just predicts 'stagnant' every time.
+    """
+    counts = y_pred.value_counts()
+    total = len(y_pred)
+    return {c: (counts.get(c, 0) / total if total else 0.0) for c in CLASS_ORDER}
 
 
 def save_rolling_accuracy_plot(series: pd.Series, path: str | Path, title: str) -> None:
@@ -118,7 +141,15 @@ def save_rolling_accuracy_plot(series: pd.Series, path: str | Path, title: str) 
 
 
 def binomial_test_vs_baseline(n_hits: int, n_trials: int, baseline_rate: float) -> dict[str, Any]:
-    """One-sided binomial test: is the model's hit rate > the baseline rate?"""
+    """One-sided binomial test: is the model's hit rate > the baseline rate?
+
+    NOTE: this treats every (ticker, day) row as an independent Bernoulli
+    trial. It isn't -- on a single day, hundreds of tickers move together on
+    market-wide news, so this massively overstates the effective sample size
+    and therefore overstates significance. Kept in metrics.json labelled
+    "row_level_overstated" for comparison; not shown in report.txt.
+    `day_level_paired_test` below is the honest version. See CLAUDE.md.
+    """
     result = binomtest(n_hits, n_trials, baseline_rate, alternative="greater")
     return {
         "n_hits": int(n_hits),
@@ -127,6 +158,95 @@ def binomial_test_vs_baseline(n_hits: int, n_trials: int, baseline_rate: float) 
         "baseline_rate": float(baseline_rate),
         "p_value": float(result.pvalue),
     }
+
+
+def _block_bootstrap_ci(
+    x: np.ndarray, block_size: int = 20, n_boot: int = 2000, seed: int = 0, ci: float = 0.95
+) -> tuple[float, float]:
+    """Moving block bootstrap CI for the mean of a daily series `x`.
+
+    Resamples overlapping blocks of `block_size` consecutive days (with
+    replacement) rather than individual days, so day-to-day autocorrelation
+    in the edge series is preserved in the resampling -- a plain i.i.d.
+    bootstrap over days would understate the CI width for the same reason
+    the row-level binomial test overstates significance.
+    """
+    n = len(x)
+    if n == 0:
+        return (float("nan"), float("nan"))
+    rng = np.random.default_rng(seed)
+    n_blocks = int(np.ceil(n / block_size))
+    max_start = max(n - block_size, 0)
+    boot_means = np.empty(n_boot)
+    for b in range(n_boot):
+        starts = rng.integers(0, max_start + 1, size=n_blocks)
+        sample = np.concatenate([x[s : s + block_size] for s in starts])[:n]
+        boot_means[b] = sample.mean()
+    lo, hi = np.percentile(boot_means, [(1 - ci) / 2 * 100, (1 + ci) / 2 * 100])
+    return float(lo), float(hi)
+
+
+def day_level_paired_test(
+    date: pd.Series,
+    y_true: pd.Series,
+    y_pred_model: pd.Series,
+    y_pred_baseline: pd.Series,
+    block_size: int = 20,
+    n_boot: int = 2000,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """The honest significance test: pair the model against the baseline at
+    the level of independent trading days, not individual (ticker, day)
+    rows (see `binomial_test_vs_baseline`'s docstring for why the row-level
+    version overstates significance).
+
+    For each trading day, computes (model's pooled accuracy that day) minus
+    (baseline's pooled accuracy that day) -- one number per day. Reports the
+    mean of that daily edge (in percentage points), a one-sided paired
+    t-test of whether it's greater than zero, and a 20-day block-bootstrap
+    95% CI that respects day-to-day autocorrelation.
+    """
+    model_daily = daily_accuracy(date, y_true, y_pred_model)
+    baseline_daily = daily_accuracy(date, y_true, y_pred_baseline)
+    edge = (model_daily - baseline_daily).dropna()
+
+    if len(edge) < 2:
+        return {
+            "n_days": int(len(edge)),
+            "mean_edge_pp": float(edge.mean() * 100) if len(edge) else 0.0,
+            "t_stat": float("nan"),
+            "p_value": float("nan"),
+            "ci95_low_pp": float("nan"),
+            "ci95_high_pp": float("nan"),
+            "block_size": block_size,
+        }
+
+    edge_arr = edge.to_numpy()
+    t_stat, p_value = ttest_1samp(edge_arr, popmean=0.0, alternative="greater")
+    ci_low, ci_high = _block_bootstrap_ci(edge_arr, block_size=block_size, n_boot=n_boot, seed=seed)
+    return {
+        "n_days": int(len(edge)),
+        "mean_edge_pp": float(edge.mean() * 100),
+        "t_stat": float(t_stat),
+        "p_value": float(p_value),
+        "ci95_low_pp": float(ci_low * 100),
+        "ci95_high_pp": float(ci_high * 100),
+        "block_size": block_size,
+    }
+
+
+def yearly_edge_table(
+    date: pd.Series, y_true: pd.Series, y_pred_model: pd.Series, y_pred_baseline: pd.Series
+) -> dict[int, float]:
+    """Mean daily edge (model accuracy - baseline accuracy), in percentage
+    points, grouped by calendar year -- so a result that's really just one
+    good (or bad) year is visible as one good (or bad) year.
+    """
+    model_daily = daily_accuracy(date, y_true, y_pred_model)
+    baseline_daily = daily_accuracy(date, y_true, y_pred_baseline)
+    edge = (model_daily - baseline_daily).dropna()
+    by_year = edge.groupby(edge.index.year).mean() * 100
+    return {int(y): float(v) for y, v in by_year.items()}
 
 
 # ---------------------------------------------------------------------------

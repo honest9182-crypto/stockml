@@ -6,6 +6,20 @@
   reported on its own line, never merged into test metrics, never used to
   decide anything. It exists only to prove the pipeline works on the
   freshest data.
+- A one-day embargo (`embargo_days`, default 1) is cut between train and
+  test: the last `embargo_days` day(s) that would otherwise be the final
+  training day(s) are dropped entirely -- not train, not test, not sanity.
+  Reason: the training row for day `t` carries `label(t)`, and
+  `label(t)` is computed from `r_next(t) = close(t+1)/close(t) - 1` (see
+  labels.py). If `t` is the last training day, `t+1` is the *first test
+  day* -- so training on that row means the label the model is fit on
+  directly encodes the first test day's close. That's not a feature
+  leaking test information, it's the *label* doing it, which no amount of
+  feature-side care (shift tests, truncation tests) would ever catch. The
+  embargo removes the row before it can happen. (The same asymmetry exists
+  one day earlier, between the last test day and the first sanity day; it
+  is deliberately left alone so the sanity slice stays exactly "the final
+  `sanity_days` trading days" as specified.)
 
 Pooled training across all tickers is the default; `per_ticker` only changes
 how models are fit in `run.py`, not how dates are split here.
@@ -32,14 +46,19 @@ class SplitDates:
 
 
 def compute_split_dates(
-    unique_dates: pd.DatetimeIndex, train_years: float, sanity_days: int
+    unique_dates: pd.DatetimeIndex,
+    train_years: float,
+    sanity_days: int,
+    embargo_days: int = 1,
 ) -> SplitDates:
     """Compute the train/test/sanity date boundaries from the set of dates present.
 
     `train_years` marks off a calendar window from the first date; every
     trading day strictly after that window and before the sanity slice is
     test. The last `sanity_days` trading days (by count, not calendar time)
-    are the sanity slice.
+    are the sanity slice. The last `embargo_days` day(s) that would
+    otherwise be the final training day(s) are dropped instead -- see the
+    module docstring for why.
     """
     dates = pd.DatetimeIndex(sorted(pd.DatetimeIndex(unique_dates).unique()))
     if len(dates) == 0:
@@ -48,6 +67,8 @@ def compute_split_dates(
         raise ValueError(
             f"sanity_days={sanity_days} invalid for {len(dates)} available dates"
         )
+    if embargo_days < 0:
+        raise ValueError(f"embargo_days={embargo_days} must be >= 0")
 
     train_start = dates[0]
     train_cutoff = train_start + pd.DateOffset(years=train_years)
@@ -59,9 +80,10 @@ def compute_split_dates(
     train_dates = pre_sanity[pre_sanity < train_cutoff]
     test_dates = pre_sanity[pre_sanity >= train_cutoff]
 
-    if len(train_dates) == 0:
+    if len(train_dates) <= embargo_days:
         raise ValueError(
-            f"train_years={train_years} leaves zero training days -- "
+            f"train_years={train_years} leaves only {len(train_dates)} training "
+            f"day(s), not enough to also drop the {embargo_days}-day embargo -- "
             f"check the date range in the config"
         )
     if len(test_dates) == 0:
@@ -70,6 +92,7 @@ def compute_split_dates(
             "widen the date range or shrink train_years/sanity_days"
         )
 
+    train_dates = train_dates[: len(train_dates) - embargo_days] if embargo_days else train_dates
     train_end = train_dates[-1]
     test_start, test_end = test_dates[0], test_dates[-1]
 

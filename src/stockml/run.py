@@ -237,7 +237,10 @@ def run(config_path: str | Path) -> Path:
 
     unique_dates = pd.DatetimeIndex(sorted(pd.to_datetime(dataset["date"]).unique()))
     split_dates = split_mod.compute_split_dates(
-        unique_dates, cfg["split"]["train_years"], cfg["split"]["sanity_days"]
+        unique_dates,
+        cfg["split"]["train_years"],
+        cfg["split"]["sanity_days"],
+        embargo_days=cfg["split"].get("embargo_days", 1),
     )
     dataset = dataset.copy()
     dataset["split"] = split_mod.assign_split(dataset["date"], split_dates)
@@ -311,15 +314,27 @@ def run(config_path: str | Path) -> Path:
     for model_name in cfg["models"]:
         test_preds = test_preds_by_model[model_name]
         n_hits = int((test_preds["y_true"] == test_preds["y_pred"]).sum())
-        results[model_name]["binomial_test"] = eval_mod.binomial_test_vs_baseline(
+        # Row-level binomial test: kept for comparison only, labelled for what
+        # it is -- rows within one day aren't independent, so this overstates
+        # significance. See evaluate.binomial_test_vs_baseline / CLAUDE.md.
+        results[model_name]["row_level_overstated"] = eval_mod.binomial_test_vs_baseline(
             n_hits, len(test_preds), majority_acc
         )
         # Align the majority baseline's predictions to this model's rows by
         # (date, ticker) rather than assuming identical row order.
-        aligned_baseline = test_preds.set_index(["date", "ticker"]).index.map(majority_lookup)
+        aligned_baseline = pd.Series(
+            test_preds.set_index(["date", "ticker"]).index.map(majority_lookup),
+            index=test_preds.index,
+        )
         results[model_name]["per_ticker"] = eval_mod.per_ticker_summary(
-            test_preds["ticker"], test_preds["y_true"], test_preds["y_pred"],
-            pd.Series(aligned_baseline, index=test_preds.index),
+            test_preds["ticker"], test_preds["y_true"], test_preds["y_pred"], aligned_baseline
+        )
+        results[model_name]["day_level_test"] = eval_mod.day_level_paired_test(
+            test_preds["date"], test_preds["y_true"], test_preds["y_pred"], aligned_baseline
+        )
+        results[model_name]["prediction_mix"] = eval_mod.prediction_mix(test_preds["y_pred"])
+        results[model_name]["yearly_edge_pp"] = eval_mod.yearly_edge_table(
+            test_preds["date"], test_preds["y_true"], test_preds["y_pred"], aligned_baseline
         )
 
     run_dir = _write_run(
@@ -409,16 +424,50 @@ def _render_report(
     if class_balance_warnings:
         lines.append("")
 
-    header = f"{'model':<16}{'accuracy':>10}{'bal.acc':>10}{'macro_f1':>10}{'p_value':>10}{'n_test':>10}"
+    # NOTE: no p_value column here -- the row-level binomial test overstates
+    # significance (rows within one day aren't independent) and is deliberately
+    # kept out of report.txt. See metrics.json's "row_level_overstated_..."
+    # key and the "day-level paired test" section below for the honest version.
+    header = f"{'model':<16}{'accuracy':>10}{'bal.acc':>10}{'macro_f1':>10}{'n_test':>10}"
     lines.append(header)
     lines.append("-" * len(header))
     for model_name, r in results.items():
         m = r["metrics"]
-        bt = r["binomial_test"]
         lines.append(
             f"{model_name:<16}{m['accuracy']:>10.4f}{m['balanced_accuracy']:>10.4f}"
-            f"{m['macro_f1']:>10.4f}{bt['p_value']:>10.4g}{m['n']:>10d}"
+            f"{m['macro_f1']:>10.4f}{m['n']:>10d}"
         )
+    lines.append("")
+
+    lines.append("day-level paired test vs. majority baseline (see CLAUDE.md -- rows within")
+    lines.append("a day aren't independent, so this is the honest significance test, not the"
+                  " row-level one):")
+    for model_name, r in results.items():
+        dl = r["day_level_test"]
+        lines.append(
+            f"  {model_name:<16} n_days={dl['n_days']:<6} mean_edge={dl['mean_edge_pp']:+7.3f}pp "
+            f"t_p={dl['p_value']:>9.4g}  95% CI=[{dl['ci95_low_pp']:+.3f}, {dl['ci95_high_pp']:+.3f}]pp"
+        )
+    lines.append("")
+
+    lines.append("prediction mix (share of down / stagnant / up the model actually predicted):")
+    for model_name, r in results.items():
+        mix = r["prediction_mix"]
+        lines.append(
+            f"  {model_name:<16} down={mix['down']:.3f} stagnant={mix['stagnant']:.3f} up={mix['up']:.3f}"
+        )
+    lines.append("")
+
+    lines.append("per-year edge vs. majority baseline (mean daily-accuracy difference, points):")
+    years = sorted({y for r in results.values() for y in r["yearly_edge_pp"].keys()})
+    if years:
+        lines.append(f"  {'model':<16}" + "".join(f"{y:>8}" for y in years))
+        for model_name, r in results.items():
+            ye = r["yearly_edge_pp"]
+            lines.append(
+                f"  {model_name:<16}"
+                + "".join(f"{ye[y]:>8.3f}" if y in ye else f"{'--':>8}" for y in years)
+            )
     lines.append("")
 
     lines.append("per-ticker accuracy (mean / median / p10 / p90 / n beating majority):")

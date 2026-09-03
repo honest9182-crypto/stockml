@@ -18,6 +18,7 @@ labels:
 split:
   train_years: 3
   sanity_days: 10
+  embargo_days: 1   # drop the last training day: its label uses the first test day's close
 
 models:
   - logreg

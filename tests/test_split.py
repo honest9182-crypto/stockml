@@ -1,5 +1,5 @@
 """Walk-forward split: strict temporal ordering, sanity slice excluded from
-test, and no overlap between the three slices.
+test, no overlap between the three slices, and the train/test embargo.
 """
 
 from __future__ import annotations
@@ -29,13 +29,12 @@ def test_sanity_slice_is_exactly_the_last_n_days():
     assert split.sanity_end == dates[-1]
 
 
-def test_assign_split_has_no_overlap_and_covers_all_dates():
+def test_assign_split_has_no_overlap_and_covers_all_dates_except_the_embargo():
     dates = _dates()
-    split = compute_split_dates(dates, train_years=1, sanity_days=10)
+    split = compute_split_dates(dates, train_years=1, sanity_days=10, embargo_days=1)
     df = pd.DataFrame({"date": dates})
     df["split"] = assign_split(df["date"], split)
 
-    assert not (df["split"] == "unassigned").any()
     assert_no_leakage(df, "split", "date")
 
     train_dates = set(df.loc[df["split"] == "train", "date"])
@@ -44,10 +43,37 @@ def test_assign_split_has_no_overlap_and_covers_all_dates():
     assert train_dates.isdisjoint(test_dates)
     assert train_dates.isdisjoint(sanity_dates)
     assert test_dates.isdisjoint(sanity_dates)
-    assert train_dates | test_dates | sanity_dates == set(dates)
+
+    # Exactly the embargoed day(s) are unassigned -- not train, not test, not sanity.
+    unassigned = set(df.loc[df["split"] == "unassigned", "date"])
+    assert len(unassigned) == 1
+    assert train_dates | test_dates | sanity_dates | unassigned == set(dates)
+
+
+def test_embargo_drops_the_last_training_day():
+    dates = _dates()
+    no_embargo = compute_split_dates(dates, train_years=1, sanity_days=10, embargo_days=0)
+    embargoed = compute_split_dates(dates, train_years=1, sanity_days=10, embargo_days=1)
+
+    # Same test/sanity boundaries either way -- only the train tail moves.
+    assert embargoed.test_start == no_embargo.test_start
+    assert embargoed.sanity_start == no_embargo.sanity_start
+    assert embargoed.train_end < no_embargo.train_end
+
+    # The embargoed day is exactly the day that used to be the last training day,
+    # and it's the day whose label would be r_next(test_start's close).
+    dropped_day = no_embargo.train_end
+    assert dropped_day > embargoed.train_end
+    assert dropped_day < embargoed.test_start
 
 
 def test_sanity_days_too_large_raises():
     dates = _dates(n_days=5)
     with pytest.raises(ValueError):
         compute_split_dates(dates, train_years=1, sanity_days=10)
+
+
+def test_embargo_too_large_raises():
+    dates = _dates(n_days=5)
+    with pytest.raises(ValueError):
+        compute_split_dates(dates, train_years=1, sanity_days=1, embargo_days=10)
