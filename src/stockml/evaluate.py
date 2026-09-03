@@ -160,7 +160,7 @@ def binomial_test_vs_baseline(n_hits: int, n_trials: int, baseline_rate: float) 
     }
 
 
-def _block_bootstrap_ci(
+def block_bootstrap_ci(
     x: np.ndarray, block_size: int = 20, n_boot: int = 2000, seed: int = 0, ci: float = 0.95
 ) -> tuple[float, float]:
     """Moving block bootstrap CI for the mean of a daily series `x`.
@@ -223,7 +223,7 @@ def day_level_paired_test(
 
     edge_arr = edge.to_numpy()
     t_stat, p_value = ttest_1samp(edge_arr, popmean=0.0, alternative="greater")
-    ci_low, ci_high = _block_bootstrap_ci(edge_arr, block_size=block_size, n_boot=n_boot, seed=seed)
+    ci_low, ci_high = block_bootstrap_ci(edge_arr, block_size=block_size, n_boot=n_boot, seed=seed)
     return {
         "n_days": int(len(edge)),
         "mean_edge_pp": float(edge.mean() * 100),

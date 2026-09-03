@@ -1,5 +1,8 @@
-"""Boring sklearn model wrappers. No tuning, no hyperparameter search --
-default params with a fixed `random_state` only (CLAUDE.md principle 5).
+"""Boring sklearn model wrappers. Step 1 uses default params with a fixed
+`random_state` only, no tuning (CLAUDE.md principle 5) -- but the
+constructors accept the hyperparameters the evolution layer's genomes
+choose between (CLAUDE.md's "evolutionary search" section), all defaulted
+to today's step-1 values so nothing about step 1 changes.
 """
 
 from __future__ import annotations
@@ -15,16 +18,37 @@ from stockml.models.base import CLASS_ORDER, reorder_proba
 from stockml.models.baselines import AlwaysUp, MajorityClass
 
 
+def _sklearn_class_weight(class_weight: str) -> str | None:
+    """Map a genome's `class_weight` gene ("none"/"balanced") to what
+    sklearn expects (`None`/"balanced") -- "none" isn't a valid sklearn
+    class_weight value, so this can't be passed through as-is.
+    """
+    return None if class_weight == "none" else class_weight
+
+
 class LogReg:
     """Multinomial logistic regression, with scaling fit inside the pipeline
     (never outside it) so the scaler only ever sees training rows.
     """
 
-    def __init__(self, random_state: int = 0) -> None:
+    def __init__(
+        self,
+        random_state: int = 0,
+        C: float = 1.0,
+        class_weight: str = "none",
+    ) -> None:
         self._pipeline = Pipeline(
             [
                 ("scale", StandardScaler()),
-                ("clf", LogisticRegression(max_iter=1000, random_state=random_state)),
+                (
+                    "clf",
+                    LogisticRegression(
+                        max_iter=1000,
+                        random_state=random_state,
+                        C=C,
+                        class_weight=_sklearn_class_weight(class_weight),
+                    ),
+                ),
             ]
         )
         self.classes_: list[str] = []
@@ -40,10 +64,27 @@ class LogReg:
 
 
 class HGB:
-    """HistGradientBoostingClassifier with default hyperparameters."""
+    """HistGradientBoostingClassifier. Defaults are sklearn's own defaults."""
 
-    def __init__(self, random_state: int = 0) -> None:
-        self._clf = HistGradientBoostingClassifier(random_state=random_state)
+    def __init__(
+        self,
+        random_state: int = 0,
+        max_depth: int | None = None,
+        learning_rate: float = 0.1,
+        max_iter: int = 100,
+        min_samples_leaf: int = 20,
+        l2_regularization: float = 0.0,
+        class_weight: str = "none",
+    ) -> None:
+        self._clf = HistGradientBoostingClassifier(
+            random_state=random_state,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            max_iter=max_iter,
+            min_samples_leaf=min_samples_leaf,
+            l2_regularization=l2_regularization,
+            class_weight=_sklearn_class_weight(class_weight),
+        )
         self.classes_: list[str] = []
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "HGB":

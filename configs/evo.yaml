@@ -1,0 +1,51 @@
+# Default evolution config: full S&P 500 universe, 2010 -> today.
+# Same global train window + embargo as configs/step1.yaml (same exam for
+# everyone). See CLAUDE.md's "Evolutionary search (step 1.5)" section.
+name: evo
+seed: 0
+
+universe:
+  csv: data/tickers/sp500.csv
+
+data:
+  start: "2010-01-01"
+  end: null           # null = today
+  cache_dir: data/cache
+  min_history_days: 1000
+
+labels:
+  k: 0.5
+  vol_window: 20
+
+split:
+  train_years: 3
+  sanity_days: 10
+  embargo_days: 1
+
+zones:
+  arena_end: "2019-12-31"     # fitness measured here -- evolution sees it thousands of times
+  vault_start: "2020-01-01"   # never touched during evolution; opened once, at the end
+
+evolution:
+  population_size: 40
+  generations: 25
+  patience: 10
+  n_elite: 2
+  n_lottery: 3
+  n_immigrants: 2
+  selection_pressure: 1.5
+  dissimilarity_power: 2.0
+  mutation_rate: 0.05
+  storm_every: 5
+  storm_factor: 5
+  min_diversity: 0.10
+  fitness_n_boot: 200     # per-genome CI in the hot loop -- cheap on purpose, see CLAUDE.md
+  report_n_boot: 2000      # vault protocol / final champion reporting -- the numbers that get written up
+  n_jobs: -2
+  arena_ticker_subsample: null   # set to an int for faster debugging without --quick
+
+leak_alarm:
+  threshold: 0.60
+  min_days: 250
+
+runs_dir: runs

@@ -10,8 +10,8 @@ import pandas as pd
 from stockml.features import build_features_panel, feature_names
 from stockml.labels import build_labels
 from stockml.models.baselines import MajorityClass
-from stockml.run import _walk_forward_single_model
 from stockml.update import Frozen, UpdatePolicy
+from stockml.walk_forward import walk_forward_single_model
 from tests.conftest import make_synthetic_panel
 
 
@@ -50,7 +50,7 @@ def test_frozen_never_updates():
 
     policy = Frozen()
     assert isinstance(policy, UpdatePolicy)
-    test_preds, _, _, n_updates = _walk_forward_single_model(
+    test_preds, _, _, n_updates = walk_forward_single_model(
         train_df, test_df, sanity_df, MajorityClass(), policy, feature_names()
     )
     assert n_updates == 0
@@ -68,7 +68,7 @@ def test_counting_policy_is_called_once_per_test_day_and_updates_every_time():
 
     policy = CountingPolicy()
     assert isinstance(policy, UpdatePolicy)
-    test_preds, _, _, n_updates = _walk_forward_single_model(
+    test_preds, _, _, n_updates = walk_forward_single_model(
         train_df, test_df, sanity_df, MajorityClass(), policy, feature_names()
     )
 

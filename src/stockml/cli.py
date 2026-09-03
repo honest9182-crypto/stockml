@@ -123,5 +123,138 @@ def leakcheck(
     typer.echo(f"[leakcheck] wrote {out_path}")
 
 
+# ---------------------------------------------------------------------------
+# Evolutionary search (step 1.5)
+# ---------------------------------------------------------------------------
+
+
+def _find_latest_completed_evo_run(runs_dir: str, name: str) -> Path:
+    from stockml.evolution.loop import read_progress
+
+    for p in sorted(Path(runs_dir).glob("evo_*"), reverse=True):  # dir names sort chronologically
+        cfg_path = p / "config.yaml"
+        if not cfg_path.exists():
+            continue
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            run_cfg = yaml.safe_load(f)
+        if run_cfg.get("name") != name:
+            continue
+        try:
+            progress = read_progress(p)
+        except FileNotFoundError:
+            continue
+        if progress.get("status") == "completed":
+            return p
+    raise FileNotFoundError(
+        f"no completed evolution run found under {runs_dir!r} matching config name {name!r} -- "
+        f"pass --run-dir explicitly"
+    )
+
+
+@app.command()
+def evolve(
+    config: str = typer.Option(..., "--config", help="Path to an evolution config YAML."),
+    quick: bool = typer.Option(False, "--quick", help="20 tickers, 6 genomes, 3 generations."),
+    resume: str = typer.Option(None, "--resume", help="Path to a runs/evo_<ts>_<name>/ to resume."),
+) -> None:
+    """Run the evolutionary search: builds generation 0, breeds/evaluates
+    each subsequent generation, writes runs/evo_<ts>_<name>/.
+    """
+    from stockml.evolution.loop import evolve as evolve_fn
+
+    run_dir = evolve_fn(config, quick=quick, resume=resume)
+    typer.echo(f"[evolve] done -> {run_dir}")
+
+
+@app.command(name="evolve-control")
+def evolve_control(
+    config: str = typer.Option(..., "--config", help="Path to an evolution config YAML."),
+    kind: str = typer.Option(..., "--kind", help="'random' or 'null'."),
+    run_dir: str = typer.Option(
+        None, "--run-dir", help="Target runs/evo_<ts>_<name>/. Default: latest completed run matching this config's name."
+    ),
+) -> None:
+    """Run one of the two controls against a completed evolution run, at
+    the same budget. Separate from `evolve` so an overnight can be split:
+    evolution one night, controls the next.
+    """
+    from stockml.evolution.controls import run_null_control, run_random_search_control
+    from stockml.evolution.fitness import canonical_majority_daily
+    from stockml.evolution.loop import build_evo_dataset, load_evo_config
+    from stockml.evolution.zones import compute_evo_zones
+
+    if kind not in ("random", "null"):
+        typer.echo(f"--kind must be 'random' or 'null', got {kind!r}", err=True)
+        raise typer.Exit(code=1)
+
+    # --config only locates the target run (by name) when --run-dir is
+    # omitted. Everything else must use the *target run's own* saved
+    # config.yaml, not a fresh load of --config -- the control has to run
+    # against the exact same universe/dates/settings the run it's being
+    # compared against actually used (e.g. a --quick run's 20-ticker
+    # override), or its budget and fitness numbers aren't comparable at all.
+    lookup_cfg = load_evo_config(config)
+    target_dir = Path(run_dir) if run_dir else _find_latest_completed_evo_run(
+        lookup_cfg["runs_dir"], lookup_cfg["name"]
+    )
+    typer.echo(f"[evolve-control {kind}] target run: {target_dir}")
+
+    with open(target_dir / "config.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    if kind == "null":
+        run_null_control(cfg, target_dir)
+        return
+
+    gens = pd.read_csv(target_dir / "generations.csv")
+    n_evals = int(gens["cumulative_evaluations"].iloc[-1])
+    raw_panel, dataset = build_evo_dataset(cfg)
+    unique_dates = pd.DatetimeIndex(sorted(pd.to_datetime(dataset["date"]).unique()))
+    zones = compute_evo_zones(
+        unique_dates, cfg["split"]["train_years"], cfg["split"]["sanity_days"],
+        cfg["split"].get("embargo_days", 1), cfg["zones"]["arena_end"], cfg["zones"]["vault_start"],
+    )
+    majority_arena = canonical_majority_daily(dataset, zones, "arena")
+    run_random_search_control(cfg, dataset, zones, majority_arena, n_evals, target_dir)
+
+
+@app.command()
+def vault(
+    run_dir: str = typer.Argument(..., help="Path to a runs/evo_<ts>_<name>/ directory."),
+) -> None:
+    """Open the vault: a one-time look at the pre-declared list of
+    individuals on the untouched vault zone. Refuses if the run is still in
+    progress. Every look is logged permanently -- see CLAUDE.md.
+    """
+    from stockml.evolution.vault import run_vault as run_vault_fn
+
+    run_vault_fn(run_dir)
+
+
+@app.command()
+def lineage(
+    run_dir: str = typer.Argument(..., help="Path to a runs/evo_<ts>_<name>/ directory."),
+    id: str = typer.Option(..., "--id", help="Individual id, e.g. '012_003'."),
+) -> None:
+    """Trace one individual's ancestry back to generation 0."""
+    from stockml.evolution.lineage import render_family_tree
+
+    typer.echo(render_family_tree(run_dir, id))
+
+
+@app.command(name="evo-report")
+def evo_report(
+    run_dir: str = typer.Argument(..., help="Path to a runs/evo_<ts>_<name>/ directory."),
+) -> None:
+    """Re-render generations.csv/gene_frequency.csv into the fitness,
+    diversity, and feature-frequency plots plus the champion's family tree.
+    Works with whichever of evolve/evolve-control/vault have finished so
+    far, and says clearly which haven't.
+    """
+    from stockml.evolution.outputs import render_all
+
+    render_all(run_dir)
+
+
 if __name__ == "__main__":
     app()
