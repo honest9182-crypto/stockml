@@ -1,0 +1,34 @@
+# Default step-1 run: full S&P 500 universe, 2010 -> today.
+name: step1
+seed: 0
+
+universe:
+  csv: data/tickers/sp500.csv
+
+data:
+  start: "2010-01-01"
+  end: null           # null = today
+  cache_dir: data/cache
+  min_history_days: 1000
+
+labels:
+  k: 0.5
+  vol_window: 20
+
+split:
+  train_years: 3
+  sanity_days: 10
+
+models:
+  - logreg
+  - hgb
+# majority_class and always_up are always added automatically as baselines.
+
+per_ticker: false
+rolling_window: 60
+
+leak_alarm:
+  threshold: 0.60
+  min_days: 250
+
+runs_dir: runs
