@@ -52,7 +52,17 @@ class FitnessResult:
     ci95_high_pp: float
     prediction_mix: dict[str, float]
     device: str = "cpu"  # what resolve_device(genome.model_family) returned
-    timing_s: dict[str, float] = field(default_factory=dict)  # TIMING_PHASES -> seconds
+    # TIMING_PHASES -> wall-clock seconds. Deliberately NOT in to_dict()'s
+    # output, and so never written to lineage.jsonl: wall-clock time is
+    # never reproducible run to run (unlike every other FitnessResult
+    # field, including `device`), and lineage.jsonl's whole point is being
+    # byte-identical across two same-seed runs (see loop.py's module
+    # docstring, and test_two_quick_runs_same_seed_produce_identical_lineage,
+    # which is exactly what caught this the first time timing_s round-
+    # tripped through to_dict()). It's for the live, this-run-only average
+    # loop.py prints per generation (_print_timing_breakdown) -- read
+    # straight off the in-memory FitnessResult, never persisted.
+    timing_s: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,7 +77,7 @@ class FitnessResult:
             "ci95_high_pp": self.ci95_high_pp,
             "prediction_mix": self.prediction_mix,
             "device": self.device,
-            "timing_s": self.timing_s,
+            # timing_s intentionally omitted -- see the field's own docstring.
         }
 
 

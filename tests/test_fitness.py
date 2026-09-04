@@ -57,7 +57,7 @@ def test_evaluate_genome_records_device_for_xgb():
     assert result.timing_s["predict"] > 0
 
 
-def test_fitness_result_to_dict_round_trips_device_and_timing():
+def test_fitness_result_to_dict_round_trips_device_but_not_timing():
     dataset, zones = _small_dataset_and_zones()
     majority_daily = canonical_majority_daily(dataset, zones, "arena")
     genome = Genome(model_family="hgb")
@@ -66,7 +66,26 @@ def test_fitness_result_to_dict_round_trips_device_and_timing():
     d = result.to_dict()
 
     assert d["device"] == result.device
-    assert d["timing_s"] == result.timing_s
+    # timing_s is deliberately NOT in to_dict()'s output -- see the field's
+    # own docstring, and the next test for exactly why.
+    assert "timing_s" not in d
+
+
+def test_to_dict_is_identical_across_two_evaluations_of_the_same_genome():
+    # This is the actual reproducibility invariant lineage.jsonl depends on
+    # (loop.py's module docstring: "two runs with the same seed produce
+    # byte-identical lineage.jsonl") -- exercised directly here rather than
+    # only via a multi-minute full `evolve --quick` run. Two evaluations of
+    # the identical genome/data/seed will still take measurably different
+    # wall-clock time; to_dict()'s output must not.
+    dataset, zones = _small_dataset_and_zones()
+    majority_daily = canonical_majority_daily(dataset, zones, "arena")
+    genome = Genome(model_family="hgb")
+
+    result_a = evaluate_genome(genome, "arena", dataset, zones, majority_daily, seed=0, n_boot=20)
+    result_b = evaluate_genome(genome, "arena", dataset, zones, majority_daily, seed=0, n_boot=20)
+
+    assert result_a.to_dict() == result_b.to_dict()
 
 
 def test_fitness_result_from_dict_defaults_device_and_timing_for_old_records():
