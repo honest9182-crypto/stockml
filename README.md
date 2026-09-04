@@ -370,19 +370,33 @@ attached as input — the notebook's own prior committed output works).
 Its cells, in order:
 
 1. Clone the repo (`REPO_URL`/`REPO_REF` from the Configure cell).
-2. `pip install -r kaggle/requirements.txt` (exact versions, pinned from
+2. Authenticate the `kaggle` CLI from Kaggle Secrets: add `KAGGLE_USERNAME`
+   and `KAGGLE_KEY` Secrets to the notebook (Add-ons → Secrets, the same two
+   fields as your local `~/.kaggle/kaggle.json`) and this cell sets them as
+   env vars for the session. Only needed for step 6 below — the main stages
+   never call the `kaggle` CLI themselves — and harmless to leave in
+   otherwise.
+3. `pip install -r kaggle/requirements.txt` (exact versions, pinned from
    `uv.lock` — see below), then `pip install -e .` for the `stockml`
    command itself.
-3. Symlink `/kaggle/input/<cache dataset>` onto `data/cache`, and set
+4. Symlink `/kaggle/input/<cache dataset>` onto `data/cache`, and set
    `STOCKML_CACHE_DIR`/`STOCKML_RUNS_DIR` (env-var overrides — see
    `run.apply_env_overrides`) so `/kaggle/working/runs` is where output
    lands regardless of where the repo got cloned, with no config file
    edited.
-4. For `resume`/`random`/`null`: copy the previous run's folder from the
+5. For `resume`/`random`/`null`: copy the previous run's folder from the
    attached input into `/kaggle/working/runs` (a real, writable copy —
    `--resume`/`--run-dir` need to write into it).
-5. Run the configured stage with `PYTHONUNBUFFERED=1` so its progress
+6. Run the configured stage with `PYTHONUNBUFFERED=1` so its progress
    prints live in the notebook instead of buffering silently for hours.
+7. Optional, off by default (`REFRESH_PRICE_CACHE = False` in the Configure
+   cell): download the full universe fresh into `data/cache_fresh/` and
+   push it as a new version of the price-cache dataset via
+   `scripts/upload_cache_dataset.py --version` — the same script "One-time
+   setup" below runs locally, just running on Kaggle's network instead. A
+   separate, self-contained maintenance action (normally its own session,
+   not combined with a `STAGE` run — a version pushed mid-session doesn't
+   remount into that same session; the next session benefits from it).
 
 `kaggle/requirements.txt` is generated with `uv export` from `uv.lock` (see
 the file's own header for the regenerate command) so the Kaggle environment
