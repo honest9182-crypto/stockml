@@ -85,6 +85,7 @@ def leakcheck(
     p = Path(run_dir)
     with open(p / "config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    run_mod.apply_env_overrides(cfg)
 
     raw_panel, dataset_df = run_mod.build_dataset(cfg)
     feat_cols = feature_names()
@@ -201,6 +202,7 @@ def evolve_control(
 
     with open(target_dir / "config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    run_mod.apply_env_overrides(cfg)
 
     if kind == "null":
         run_null_control(cfg, target_dir)
@@ -254,6 +256,67 @@ def evo_report(
     from stockml.evolution.outputs import render_all
 
     render_all(run_dir)
+
+
+# ---------------------------------------------------------------------------
+# Kaggle (see README's "Running on Kaggle")
+# ---------------------------------------------------------------------------
+
+
+@app.command(name="fetch-run")
+def fetch_run(
+    kernel_ref: str = typer.Argument(..., help="Kaggle kernel ref, e.g. 'yourusername/stockml-stage-evolve'."),
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Local runs/ directory to land the run folder(s) in."),
+) -> None:
+    """Download a Kaggle notebook's output (`kaggle kernels output`) and
+    fold its run folder(s) into runs_dir, so a run produced on Kaggle by
+    kaggle/stage.ipynb (which sets STOCKML_RUNS_DIR=/kaggle/working/runs)
+    can be inspected, resumed, or vaulted exactly like a local one.
+
+    The raw download always lands whole under
+    runs_dir/kernel_output/<kernel-ref>/ first; any runs/<...>/ folder
+    inside it (evo_<ts>_<name>/ or <ts>_<name>/) is then copied up into
+    runs_dir itself. A name collision with an existing local run is left
+    where it is under kernel_output/, with a warning, rather than
+    overwritten.
+
+    Requires the `kaggle` CLI installed and configured (same as
+    scripts/upload_cache_dataset.py) -- this only shells out to it.
+    """
+    import shutil
+    import subprocess
+
+    runs_path = Path(runs_dir)
+    slug = kernel_ref.replace("/", "_")
+    raw_dest = runs_path / "kernel_output" / slug
+    raw_dest.mkdir(parents=True, exist_ok=True)
+
+    cmd = ["kaggle", "kernels", "output", kernel_ref, "-p", str(raw_dest)]
+    typer.echo(f"[fetch-run] {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+    nested_runs = raw_dest / "runs"
+    landed = []
+    if nested_runs.is_dir():
+        for child in sorted(nested_runs.iterdir()):
+            if not child.is_dir():
+                continue
+            dest = runs_path / child.name
+            if dest.exists():
+                typer.echo(f"[fetch-run][WARN] {dest} already exists locally -- left the downloaded copy at {child}")
+                continue
+            shutil.copytree(child, dest)
+            landed.append(dest)
+
+    typer.echo(f"[fetch-run] raw output -> {raw_dest}")
+    if landed:
+        for d in landed:
+            typer.echo(f"[fetch-run] run folder -> {d}")
+    else:
+        typer.echo(
+            "[fetch-run][WARN] no runs/<...>/ folders found in the kernel output -- "
+            "was STOCKML_RUNS_DIR set to /kaggle/working/runs in the notebook?"
+        )
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from stockml.evolution.loop import evolve
 
 CONFIG = "configs/evo.yaml"
@@ -52,3 +54,27 @@ def test_two_quick_runs_same_seed_produce_identical_lineage():
     gens_a = (Path(run_dir_a) / "generations.csv").read_text(encoding="utf-8")
     gens_b = (Path(run_dir_b) / "generations.csv").read_text(encoding="utf-8")
     assert gens_a == gens_b
+
+
+def test_quick_run_persists_pristine_cache_dir_and_runs_dir(tmp_path, monkeypatch):
+    """A run created under Kaggle-style env-var overrides (kaggle/stage.ipynb)
+    must still be resumable/vault-able locally: its own config.yaml snapshot
+    has to record configs/evo.yaml's real cache_dir/runs_dir, not the
+    overridden ones -- see run.apply_env_overrides and
+    evolution.loop.parse_evo_config's docstrings.
+    """
+    override_runs_dir = tmp_path / "kaggle_working_runs"
+    override_cache_dir = str(Path("data/cache").resolve())
+    monkeypatch.setenv("STOCKML_RUNS_DIR", str(override_runs_dir))
+    monkeypatch.setenv("STOCKML_CACHE_DIR", override_cache_dir)
+
+    run_dir = evolve(CONFIG, quick=True)
+
+    # the run itself actually used the override...
+    assert Path(run_dir).is_relative_to(override_runs_dir)
+
+    # ...but what it wrote to disk is the source config's own values.
+    with open(Path(run_dir) / "config.yaml", "r", encoding="utf-8") as f:
+        saved_cfg = yaml.safe_load(f)
+    assert saved_cfg["runs_dir"] == "runs"
+    assert saved_cfg["data"]["cache_dir"] == "data/cache"

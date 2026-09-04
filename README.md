@@ -35,6 +35,9 @@ uv run stockml vault           runs/evo_<ts>_<name>/
 uv run stockml lineage          runs/evo_<ts>_<name>/ --id <individual>
 uv run stockml evo-report        runs/evo_<ts>_<name>/
 
+# running evolve on Kaggle (see "Running on Kaggle" below)
+uv run stockml fetch-run <kernel-ref>   # pull a Kaggle notebook's run output into runs/
+
 uv run pytest -q
 ```
 
@@ -244,3 +247,106 @@ genomes: ~3.3 min serial vs. not finishing in 10 min "parallel"). Fixed with
 already a scikit-learn dependency, no new one added. This is exactly why
 `--quick` exists: catching this on a 3-minute run instead of during a
 population-40/generations-25/full-S&P-500 overnight run.
+
+## Running on Kaggle
+
+`configs/evo.yaml`'s real (non-`--quick`) run is a genuine overnight job —
+too long, and too much CPU, for most laptops. Kaggle notebooks give a free
+CPU environment for exactly this, at the cost of a hard session limit.
+Everything below lives in `kaggle/` and `scripts/upload_cache_dataset.py`;
+none of it changes what a local run does.
+
+**The 12-hour session cap.** A Kaggle notebook session is killed at 12
+hours regardless of progress. `configs/evo.yaml`'s default (population 40,
+generations 25, full S&P 500) will not finish in one session — that's
+expected. `evolve`'s own persistence (`progress.json`, `lineage.jsonl`,
+generation-by-generation `--resume` — see "Evolutionary search" above) is
+exactly what makes splitting a run across sessions lossless: a session that
+gets killed mid-generation loses at most the generation in progress, never
+anything already written.
+
+**The chaining order**, each step a separate Kaggle notebook session (via
+`kaggle/stage.ipynb`, described below):
+
+1. **`evolve`** — starts a fresh run against `configs/evo.yaml`.
+2. **`resume`** — continues the same run from its last completed
+   generation. Repeat across as many sessions as it takes until
+   `progress.json` reports `"status": "completed"`.
+3. **`random`** and **`null`** — the two controls (see "Evolutionary
+   search" above), run against the now-completed evolution run, same
+   budget each. Either order; each is its own session if it doesn't fit
+   in the remainder of one.
+4. **`vault`** — run **locally**, not on Kaggle, once you've pulled the
+   completed run down with `fetch-run` (below). It's a few rows and a log
+   write; it doesn't need a Kaggle session, and CLAUDE.md's vault
+   guard (`progress.json` must say `"status": "completed"`) applies the
+   same either way.
+
+### One-time setup: upload the price cache
+
+Kaggle notebooks can't see your local `data/cache/`. Build it locally first
+(`stockml download --config configs/evo.yaml`, full S&P 500 back to 2010 —
+this is the slow, one-time part), then package and upload it as a private
+Kaggle Dataset:
+
+```
+pip install kaggle   # once; see https://www.kaggle.com/docs/api#authentication
+                      # for ~/.kaggle/kaggle.json credential setup
+
+uv run python scripts/upload_cache_dataset.py --kaggle-username <you> --dry-run   # review first
+uv run python scripts/upload_cache_dataset.py --kaggle-username <you>              # then actually create it
+
+# later, once the local cache has grown (more history, more tickers):
+uv run python scripts/upload_cache_dataset.py --kaggle-username <you> --version
+```
+
+This never makes anything public — `kaggle datasets create` defaults to
+private and the script never passes `-u`/`--public`. It packages
+`data/cache/*.parquet` plus a pinned snapshot of `data/tickers/sp500.csv`
+(a dataset-metadata.json is generated alongside them); see the script's
+docstring for why the layout is deliberately flat.
+
+### The notebook: `kaggle/stage.ipynb`
+
+Upload this notebook to Kaggle (or paste its cells into a new one), attach
+the price-cache dataset as an input, and edit the `STAGE` variable in its
+"Configure" cell to one of `evolve` / `resume` / `random` / `null` per the
+chaining order above (`resume`/`random`/`null` also need a previous run
+attached as input — the notebook's own prior committed output works).
+Its cells, in order:
+
+1. Clone the repo (`REPO_URL`/`REPO_REF` from the Configure cell).
+2. `pip install -r kaggle/requirements.txt` (exact versions, pinned from
+   `uv.lock` — see below), then `pip install -e .` for the `stockml`
+   command itself.
+3. Symlink `/kaggle/input/<cache dataset>` onto `data/cache`, and set
+   `STOCKML_CACHE_DIR`/`STOCKML_RUNS_DIR` (env-var overrides — see
+   `run.apply_env_overrides`) so `/kaggle/working/runs` is where output
+   lands regardless of where the repo got cloned, with no config file
+   edited.
+4. For `resume`/`random`/`null`: copy the previous run's folder from the
+   attached input into `/kaggle/working/runs` (a real, writable copy —
+   `--resume`/`--run-dir` need to write into it).
+5. Run the configured stage with `PYTHONUNBUFFERED=1` so its progress
+   prints live in the notebook instead of buffering silently for hours.
+
+`kaggle/requirements.txt` is generated with `uv export` from `uv.lock` (see
+the file's own header for the regenerate command) so the Kaggle environment
+resolves to the exact same package versions a local `uv pip install -e .`
+would, not whatever Kaggle's base image happens to have.
+
+### Getting a run back off Kaggle
+
+Commit the notebook version (Save Version → Save & Run All) so
+`/kaggle/working` becomes that version's attachable output, then either
+keep chaining on Kaggle (attach that output as the next session's input) or
+pull it down locally:
+
+```
+uv run stockml fetch-run <your-username>/<notebook-slug>
+```
+
+This shells out to `kaggle kernels output` and folds any `runs/<...>/`
+folder in the notebook's output up into your local `runs/`, so a run
+produced on Kaggle can be resumed, controlled, vaulted, or reported on
+exactly like a local one (`stockml evo-report`, `stockml vault`, ...).

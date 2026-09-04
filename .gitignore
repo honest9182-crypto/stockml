@@ -7,3 +7,4 @@ runs/
 .pytest_cache/
 build/
 dist/
+kaggle/.dataset_staging/

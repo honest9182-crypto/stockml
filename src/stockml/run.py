@@ -6,7 +6,9 @@ Every run writes its resolved config, metrics, and predictions to
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import random
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +37,39 @@ MANDATORY_BASELINES = ["majority_class", "always_up"]
 # ---------------------------------------------------------------------------
 
 
-def load_config(path: str | Path) -> dict[str, Any]:
+def apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Lets `runs_dir` and `data.cache_dir` be overridden by environment
+    variables, in place, without editing the config file itself.
+
+    This exists for kaggle/stage.ipynb (see README's "Running on Kaggle"):
+    a notebook's working directory is ephemeral, so it needs run output to
+    land at a fixed absolute path (`/kaggle/working/runs`) regardless of
+    where the repo happens to be cloned, and the price cache to be read
+    straight from a mounted, read-only input dataset -- neither of which a
+    config file shared with local runs should have to hardcode. Called by
+    both `run.load_config` and `evolution.loop.load_evo_config` so it
+    applies uniformly to step-1 and evolution configs alike.
+    """
+    runs_dir = os.environ.get("STOCKML_RUNS_DIR")
+    if runs_dir:
+        cfg["runs_dir"] = runs_dir
+    cache_dir = os.environ.get("STOCKML_CACHE_DIR")
+    if cache_dir:
+        cfg.setdefault("data", {})["cache_dir"] = cache_dir
+    return cfg
+
+
+def parse_config(path: str | Path) -> dict[str, Any]:
+    """Parse a config YAML and fill in defaults -- no env-var overrides.
+
+    This is the pristine, portable version of a config: it's what a fresh
+    `run()` persists into its own `runs/<ts>_<name>/config.yaml` snapshot,
+    so that snapshot never bakes in a Kaggle session's env-var redirection
+    (see `apply_env_overrides`) -- a run produced on Kaggle must still be
+    resumable/vault-able locally, with no env vars set at all, by re-reading
+    that same snapshot and getting `data/cache`/`runs` straight back.
+    `load_config` (below) is what almost everything else should call.
+    """
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     cfg.setdefault("seed", 0)
@@ -48,6 +82,13 @@ def load_config(path: str | Path) -> dict[str, Any]:
             models.insert(0, b)
     cfg["models"] = models
     return cfg
+
+
+def load_config(path: str | Path) -> dict[str, Any]:
+    """`parse_config` plus `STOCKML_RUNS_DIR`/`STOCKML_CACHE_DIR` overrides
+    -- the fully resolved, ready-to-run config almost every caller wants.
+    """
+    return apply_env_overrides(parse_config(path))
 
 
 def set_seed(seed: int) -> None:
@@ -165,7 +206,12 @@ def run_walk_forward(
 
 
 def run(config_path: str | Path) -> Path:
-    cfg = load_config(config_path)
+    # cfg_to_persist (pristine) is what gets written to this run's own
+    # config.yaml snapshot; cfg (env-override-applied) is what actually runs
+    # -- see parse_config's docstring for why they're not the same object.
+    cfg_to_persist = parse_config(config_path)
+    cfg = copy.deepcopy(cfg_to_persist)
+    apply_env_overrides(cfg)
     set_seed(cfg["seed"])
 
     raw_panel, dataset = build_dataset(cfg)
@@ -274,7 +320,7 @@ def run(config_path: str | Path) -> Path:
         )
 
     run_dir = _write_run(
-        cfg, results, test_preds_by_model, sanity_preds_by_model,
+        cfg, cfg_to_persist, results, test_preds_by_model, sanity_preds_by_model,
         fitted_models, leak_reports, class_balance_warnings,
     )
     return run_dir
@@ -282,6 +328,7 @@ def run(config_path: str | Path) -> Path:
 
 def _write_run(
     cfg: dict[str, Any],
+    cfg_to_persist: dict[str, Any],
     results: dict[str, Any],
     test_preds_by_model: dict[str, pd.DataFrame],
     sanity_preds_by_model: dict[str, pd.DataFrame],
@@ -295,7 +342,7 @@ def _write_run(
     (run_dir / "models").mkdir(parents=True, exist_ok=True)
 
     with open(run_dir / "config.yaml", "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
+        yaml.safe_dump(cfg_to_persist, f, sort_keys=False)
 
     def _json_default(o: Any) -> Any:
         if isinstance(o, pd.Series):

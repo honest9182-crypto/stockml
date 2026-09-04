@@ -15,6 +15,7 @@ draws happen serially in the main process before any parallel dispatch).
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
 import json
@@ -80,7 +81,16 @@ class LeakAlarmTripped(Exception):
 # ---------------------------------------------------------------------------
 
 
-def load_evo_config(path: str | Path) -> dict[str, Any]:
+def parse_evo_config(path: str | Path) -> dict[str, Any]:
+    """Parse an evolution config YAML and fill in defaults -- no env-var
+    overrides. The pristine, portable version, exactly like
+    `run.parse_config`: `evolve()`'s fresh-run path persists this (plus
+    `--quick`'s overrides, which ARE a real semantic difference in the run
+    and belong in the snapshot) into the run's own config.yaml, never the
+    env-var-redirected version -- see `run.apply_env_overrides`'s docstring
+    for why. `load_evo_config` (below) is what almost everything else
+    should call.
+    """
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     cfg.setdefault("seed", 0)
@@ -108,6 +118,14 @@ def load_evo_config(path: str | Path) -> dict[str, Any]:
     ev.setdefault("n_jobs", -2)
     ev.setdefault("arena_ticker_subsample", None)
     return cfg
+
+
+def load_evo_config(path: str | Path) -> dict[str, Any]:
+    """`parse_evo_config` plus `STOCKML_RUNS_DIR`/`STOCKML_CACHE_DIR`
+    overrides -- the fully resolved, ready-to-run config almost every
+    caller wants.
+    """
+    return run_mod.apply_env_overrides(parse_evo_config(path))
 
 
 def apply_quick_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -465,6 +483,7 @@ def evolve(config_path: str | Path | None, quick: bool = False, resume: str | Pa
         run_dir = Path(resume)
         with open(run_dir / "config.yaml", "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
+        run_mod.apply_env_overrides(cfg)
         progress = read_progress(run_dir)
         if progress["status"] == "completed":
             print(f"[evolve] {run_dir} is already completed -- nothing to resume")
@@ -486,14 +505,20 @@ def evolve(config_path: str | Path | None, quick: bool = False, resume: str | Pa
         champion_id = progress.get("champion_id")
         print(f"[evolve] resuming {run_dir} from generation {start_gen}")
     else:
-        cfg = load_evo_config(config_path)
+        # cfg_to_persist (pristine, plus --quick's real semantic overrides)
+        # is what gets written to this run's own config.yaml snapshot; cfg
+        # (env-override-applied) is what actually runs -- see
+        # parse_evo_config's docstring for why they're not the same object.
+        cfg_to_persist = parse_evo_config(config_path)
         if quick:
-            cfg = apply_quick_overrides(cfg)
+            cfg_to_persist = apply_quick_overrides(cfg_to_persist)
+        cfg = copy.deepcopy(cfg_to_persist)
+        run_mod.apply_env_overrides(cfg)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         run_dir = Path(cfg["runs_dir"]) / f"evo_{ts}_{cfg['name']}"
         run_dir.mkdir(parents=True, exist_ok=True)
         with open(run_dir / "config.yaml", "w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False)
+            yaml.safe_dump(cfg_to_persist, f, sort_keys=False)
         start_gen = 0
         cache = {}
         population = None

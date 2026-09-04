@@ -20,6 +20,7 @@ import pandas as pd
 import yaml
 
 from stockml import evaluate as eval_mod
+from stockml import run as run_mod
 from stockml.evolution import lineage as lineage_mod
 from stockml.evolution.fitness import FitnessResult, canonical_majority_daily, evaluate_genome
 from stockml.evolution.genome import SEED_HGB, SEED_LOGREG, Genome
@@ -161,6 +162,7 @@ def run_vault(run_dir: str | Path) -> Path:
     _assert_not_running(run_dir)
     with open(run_dir / "config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    run_mod.apply_env_overrides(cfg)
 
     vault_list = build_vault_list(run_dir)
 
