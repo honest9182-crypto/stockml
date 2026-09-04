@@ -236,6 +236,41 @@ the step-1 seeds is precisely the open question the real overnight run
 (`configs/evo.yaml`, `population_size: 40`, `generations: 25`, full S&P 500)
 is for.
 
+### Model families and GPU acceleration
+
+Three model families a genome can choose (`model_family` gene): `logreg`
+and `hgb` (both scikit-learn, matching step 1's own two models exactly —
+the two seeded individuals, `SEED_LOGREG`/`SEED_HGB`, stay scikit-learn
+always, regardless of what else is available), and `xgb`
+(`models/xgb_model.py`). `xgb` reuses the `hgb_*` hyperparameter genes
+rather than adding a parallel gene set (`max_depth`, `learning_rate`,
+`n_estimators` <- `hgb_max_iter`, `min_child_weight` <- `hgb_min_samples_leaf`,
+`reg_lambda` <- `hgb_l2`) — see that module's docstring for the exact
+mapping and two small semantic differences worth knowing about (`max_depth
+=None` and `min_child_weight`'s scale don't mean quite the same thing to
+XGBoost as to `HistGradientBoostingClassifier`). `xgb` runs on
+`device="cuda"` automatically when a GPU is present (`evolution/device.py`'s
+`nvidia-smi`-based detection — e.g. a Kaggle notebook with its accelerator
+set to GPU) and `"cpu"` otherwise, with no config change either way; which
+device actually ran is recorded per-evaluation in `FitnessResult.device`
+and, for the run as a whole, in its own `config.yaml`'s `evolution.device`.
+
+Every genome evaluation's timing (`fit` / `predict` / `metrics` /
+`bootstrap` — `evolution/fitness.py`'s `TIMING_PHASES`) is recorded into its
+`FitnessResult` and the average is printed once per generation — `fit` and
+`predict` are the only two phases a device could ever touch; `metrics` and
+`bootstrap` are pure pandas/numpy on the resulting predictions and always
+run on CPU. On a `--quick` run (20 tickers, generation 0's 6 fresh
+evaluations, this machine's own GPU) fit+predict were ~99–100% of total
+per-genome cost both before and after, and adding `xgb` to the drawable
+grid — some of generation 0's random genomes landing on GPU-accelerated
+`xgb` — measurably dropped the average:
+
+| | fit | predict | metrics | bootstrap | total (avg/genome) |
+|---|---|---|---|---|---|
+| before (`logreg`/`hgb` only) | 10.888s (31%) | 23.745s (68%) | 0.143s (0%) | 0.040s (0%) | 34.816s |
+| after (`xgb` included, GPU auto-selected) | 10.122s (36%) | 18.095s (64%) | 0.132s (0%) | 0.031s (0%) | 28.380s |
+
 ### A bug the `--quick` run caught before it could waste a night
 
 Running genomes in parallel was initially measured to be *slower* than
@@ -252,9 +287,14 @@ population-40/generations-25/full-S&P-500 overnight run.
 
 `configs/evo.yaml`'s real (non-`--quick`) run is a genuine overnight job —
 too long, and too much CPU, for most laptops. Kaggle notebooks give a free
-CPU environment for exactly this, at the cost of a hard session limit.
-Everything below lives in `kaggle/` and `scripts/upload_cache_dataset.py`;
-none of it changes what a local run does.
+CPU (or, with the notebook's accelerator set to GPU, free GPU) environment
+for exactly this, at the cost of a hard session limit. Everything below
+lives in `kaggle/` and `scripts/upload_cache_dataset.py`; none of it
+changes what a local run does. Setting the notebook's accelerator to GPU
+needs no config change either — `xgb` genomes (see "Model families and GPU
+acceleration" above) detect and use it automatically, `kaggle/requirements.txt`
+already pins a CUDA-capable `xgboost` wheel, and `logreg`/`hgb` genomes are
+unaffected either way (scikit-learn, CPU-only).
 
 **The 12-hour session cap.** A Kaggle notebook session is killed at 12
 hours regardless of progress. `configs/evo.yaml`'s default (population 40,

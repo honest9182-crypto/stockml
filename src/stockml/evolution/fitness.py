@@ -13,13 +13,15 @@ reporting re-evaluate the short final list of individuals with a much larger
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from stockml import evaluate as eval_mod
+from stockml.evolution.device import resolve_device
 from stockml.evolution.genome import Genome
 from stockml.evolution.model_builder import build_model
 from stockml.evolution.zones import EvoZones
@@ -29,6 +31,12 @@ from stockml.update import Frozen
 from stockml.walk_forward import walk_forward_single_model
 
 DEFAULT_FITNESS_N_BOOT = 200
+
+# The four phases evaluate_genome times, in the order they run. "fit" and
+# "predict" are the two GPU acceleration (the "xgb" model_family) could
+# actually touch; "metrics" and "bootstrap" are pure pandas/numpy on the
+# resulting predictions and never run on a device.
+TIMING_PHASES = ("fit", "predict", "metrics", "bootstrap")
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,8 @@ class FitnessResult:
     ci95_low_pp: float
     ci95_high_pp: float
     prediction_mix: dict[str, float]
+    device: str = "cpu"  # what resolve_device(genome.model_family) returned
+    timing_s: dict[str, float] = field(default_factory=dict)  # TIMING_PHASES -> seconds
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +66,8 @@ class FitnessResult:
             "ci95_low_pp": self.ci95_low_pp,
             "ci95_high_pp": self.ci95_high_pp,
             "prediction_mix": self.prediction_mix,
+            "device": self.device,
+            "timing_s": self.timing_s,
         }
 
 
@@ -94,10 +106,18 @@ def evaluate_genome(
 
     active = genome.active_features()
     model = build_model(genome, seed)
+    device = resolve_device(genome.model_family)
+
+    # fit_s/predict_s come back from walk_forward_single_model itself (it's
+    # the only thing that actually calls model.fit/predict_proba); metrics_s
+    # and bootstrap_s are timed here, around this function's own pandas/
+    # numpy work on the resulting predictions -- see TIMING_PHASES.
+    timing: dict[str, float] = {}
     preds, _, _, _ = walk_forward_single_model(
-        train_df, eval_df, eval_df.iloc[0:0], model, Frozen(), active
+        train_df, eval_df, eval_df.iloc[0:0], model, Frozen(), active, timing=timing
     )
 
+    t0 = time.perf_counter()
     model_daily = eval_mod.daily_accuracy(preds["date"], preds["y_true"], preds["y_pred"])
     edge = (model_daily - majority_daily).dropna()
 
@@ -108,7 +128,6 @@ def evaluate_genome(
     if n_days == 0:
         mean_edge_pp = se_pp = 0.0
         fitness = 0.0
-        ci_low = ci_high = 0.0
     else:
         edge_arr = edge.to_numpy()
         mean_edge = float(edge_arr.mean())
@@ -116,11 +135,15 @@ def evaluate_genome(
         mean_edge_pp = mean_edge * 100
         se_pp = se * 100
         fitness = mean_edge_pp - se_pp
-        if n_days > 1 and n_boot > 0:
-            ci_low, ci_high = eval_mod.block_bootstrap_ci(edge_arr, block_size=20, n_boot=n_boot, seed=seed)
-            ci_low, ci_high = ci_low * 100, ci_high * 100
-        else:
-            ci_low = ci_high = mean_edge_pp
+    timing["metrics"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    if n_days > 1 and n_boot > 0:
+        ci_low, ci_high = eval_mod.block_bootstrap_ci(edge_arr, block_size=20, n_boot=n_boot, seed=seed)
+        ci_low, ci_high = ci_low * 100, ci_high * 100
+    else:
+        ci_low = ci_high = mean_edge_pp
+    timing["bootstrap"] = time.perf_counter() - t0
 
     return FitnessResult(
         genome_hash=genome.stable_hash(),
@@ -133,6 +156,13 @@ def evaluate_genome(
         ci95_low_pp=ci_low,
         ci95_high_pp=ci_high,
         prediction_mix=mix,
+        device=device,
+        timing_s={
+            "fit": timing.get("fit_s", 0.0),
+            "predict": timing.get("predict_s", 0.0),
+            "metrics": timing["metrics"],
+            "bootstrap": timing["bootstrap"],
+        },
     )
 
 

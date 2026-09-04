@@ -35,6 +35,7 @@ from stockml import evaluate as eval_mod
 from stockml import run as run_mod
 from stockml.evolution import lineage as lineage_mod
 from stockml.evolution import outputs as outputs_mod
+from stockml.evolution.device import resolve_device
 from stockml.evolution.fitness import FitnessResult, canonical_majority_daily, evaluate_genome
 from stockml.evolution.genome import SEED_HGB, SEED_LOGREG, Genome, random_genome
 from stockml.evolution.model_builder import build_model
@@ -211,6 +212,24 @@ def _initial_population(cfg: dict[str, Any], rng: np.random.Generator) -> list[I
     return pop
 
 
+def _print_timing_breakdown(results: list[FitnessResult], log_prefix: str = "evolve") -> None:
+    """Averages each `FitnessResult.timing_s` phase (see fitness.py's
+    TIMING_PHASES) over `results` and prints the split -- e.g. to see what
+    share of a genome's evaluation cost fit/predict actually are, and so
+    what share GPU acceleration (the "xgb" model_family) could touch.
+    """
+    from stockml.evolution.fitness import TIMING_PHASES
+
+    if not results:
+        return
+    avg = {p: float(np.mean([r.timing_s.get(p, 0.0) for r in results])) for p in TIMING_PHASES}
+    total = sum(avg.values())
+    if total <= 0:
+        return
+    parts = " ".join(f"{p}={avg[p]:.3f}s({100 * avg[p] / total:.0f}%)" for p in TIMING_PHASES)
+    print(f"[{log_prefix}] timing (avg over {len(results)} genomes this generation): {parts} total={total:.3f}s")
+
+
 def _evaluate_population(
     individuals_needing_eval: list[Individual],
     dataset: pd.DataFrame,
@@ -218,6 +237,7 @@ def _evaluate_population(
     majority_arena: pd.Series,
     cfg: dict[str, Any],
     cache: dict[str, FitnessResult],
+    log_prefix: str = "evolve",
 ) -> tuple[int, int]:
     """Evaluates every individual with `fitness is None`, deduped by genome
     hash and memoized in `cache` across the whole run. Returns
@@ -247,6 +267,7 @@ def _evaluate_population(
                 )
                 for _, genome in items
             )
+        _print_timing_breakdown(results, log_prefix)
         threshold = cfg["leak_alarm"]["threshold"]
         min_days = cfg["leak_alarm"]["min_days"]
         for (h, genome), result in zip(items, results):
@@ -333,11 +354,15 @@ def _append_generations_csv(run_dir: Path, row: dict[str, Any]) -> None:
 
 
 def _fitness_result_from_dict(d: dict[str, Any]) -> FitnessResult:
+    # .get(..., default) for "device"/"timing_s": a lineage.jsonl written
+    # before those fields existed still decodes -- same rule as Genome's
+    # own fields (see genome.py's module docstring).
     return FitnessResult(
         genome_hash=d["genome_hash"], zone=d["zone"], n_days=d["n_days"],
         mean_edge_pp=d["mean_edge_pp"], se_pp=d["se_pp"], fitness=d["fitness"],
         accuracy=d["accuracy"], ci95_low_pp=d["ci95_low_pp"], ci95_high_pp=d["ci95_high_pp"],
         prediction_mix=d["prediction_mix"],
+        device=d.get("device", "cpu"), timing_s=d.get("timing_s", {}),
     )
 
 
@@ -391,7 +416,9 @@ def run_generation_loop(
                 population, is_storm = next_generation(population, gen, ev_cfg, rng, force_storm)
 
             needing_eval = [ind for ind in population if ind.fitness is None]
-            n_eval, n_memo = _evaluate_population(needing_eval, dataset, zones, majority_arena, cfg, cache)
+            n_eval, n_memo = _evaluate_population(
+                needing_eval, dataset, zones, majority_arena, cfg, cache, log_prefix
+            )
 
             lineage_mod.append_lineage(run_dir, [ind for ind in population if ind.fitness is not None])
 
@@ -512,6 +539,13 @@ def evolve(config_path: str | Path | None, quick: bool = False, resume: str | Pa
         cfg_to_persist = parse_evo_config(config_path)
         if quick:
             cfg_to_persist = apply_quick_overrides(cfg_to_persist)
+        # Informational, not load-bearing (unlike runs_dir/cache_dir): what
+        # an "xgb" genome would actually run on, on this machine, right now.
+        # Recorded (not just logged) so a run's own config.yaml always says
+        # what device it evaluated xgb genomes on -- see FitnessResult's own
+        # per-evaluation `device` field for the authoritative, always-live
+        # record if this run gets resumed on different hardware later.
+        cfg_to_persist.setdefault("evolution", {})["device"] = resolve_device("xgb")
         cfg = copy.deepcopy(cfg_to_persist)
         run_mod.apply_env_overrides(cfg)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

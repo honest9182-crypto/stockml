@@ -9,9 +9,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from stockml.evolution.device import resolve_device
 from stockml.evolution.genome import Genome
 from stockml.models.base import CLASS_ORDER
 from stockml.models.sklearn_models import HGB, LogReg
+from stockml.models.xgb_model import XGB
 
 
 class BiasedModel:
@@ -52,6 +54,19 @@ def build_model(genome: Genome, seed: int):
             min_samples_leaf=genome.hgb_min_samples_leaf,
             l2_regularization=genome.hgb_l2,
             class_weight=genome.class_weight,
+        )
+    elif genome.model_family == "xgb":
+        # Reuses the hgb_* genes -- see models/xgb_model.py's module
+        # docstring for the exact mapping and its two caveats (max_depth's
+        # None semantics, min_child_weight vs. min_samples_leaf's scale).
+        base = XGB(
+            random_state=seed,
+            max_depth=genome.hgb_max_depth,
+            learning_rate=genome.hgb_learning_rate,
+            n_estimators=genome.hgb_max_iter,
+            min_child_weight=genome.hgb_min_samples_leaf,
+            reg_lambda=genome.hgb_l2,
+            device=resolve_device(genome.model_family),
         )
     else:
         raise ValueError(f"unknown model_family {genome.model_family!r}")

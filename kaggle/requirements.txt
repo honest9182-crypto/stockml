@@ -58,6 +58,7 @@ numpy==2.4.6 ; python_full_version < '3.12'
     #   scikit-learn
     #   scipy
     #   stockml
+    #   xgboost
     #   yfinance
 numpy==2.5.2 ; python_full_version >= '3.12'
     # via
@@ -67,7 +68,12 @@ numpy==2.5.2 ; python_full_version >= '3.12'
     #   scikit-learn
     #   scipy
     #   stockml
+    #   xgboost
     #   yfinance
+nvidia-nccl-cu12==2.31.2 ; python_full_version < '3.12' and sys_platform == 'linux'
+    # via xgboost
+nvidia-nccl-cu13==2.31.2 ; python_full_version >= '3.12' and sys_platform == 'linux'
+    # via xgboost
 packaging==26.3
     # via matplotlib
 pandas==2.3.3
@@ -110,10 +116,12 @@ scipy==1.17.1 ; python_full_version < '3.12'
     # via
     #   scikit-learn
     #   stockml
+    #   xgboost
 scipy==1.18.1 ; python_full_version >= '3.12'
     # via
     #   scikit-learn
     #   stockml
+    #   xgboost
 shellingham==1.5.4
     # via typer
 six==1.17.0
@@ -132,5 +140,9 @@ urllib3==2.7.0
     # via requests
 websockets==17.1
     # via yfinance
+xgboost==3.2.0 ; python_full_version < '3.12'
+    # via stockml
+xgboost==3.4.1 ; python_full_version >= '3.12'
+    # via stockml
 yfinance==1.7.0
     # via stockml

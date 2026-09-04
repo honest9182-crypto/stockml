@@ -6,6 +6,7 @@ second implementation to keep in sync or accidentally diverge from.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pandas as pd
@@ -52,6 +53,7 @@ def walk_forward_single_model(
     model: Any,
     update_policy: UpdatePolicy,
     feature_cols: list[str],
+    timing: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Any, int]:
     """Fit on `train_df`, predict `test_df` one day at a time (so a real
     update policy can slot in without restructuring this loop), then predict
@@ -62,11 +64,23 @@ def walk_forward_single_model(
     "test" beyond "the frame it predicts day by day and reports". Pass an
     empty `sanity_df` (e.g. `test_df.iloc[0:0]`) when there's no sanity
     slice to predict, as evolution's fitness evaluation does.
+
+    Pass a dict as `timing` to have `fit_s`/`predict_s` (wall-clock seconds)
+    written into it -- e.g. evolution/fitness.py's per-genome timing
+    breakdown, to see what share of a genome's evaluation cost fit vs.
+    predict, and so what share GPU acceleration could actually touch.
+    Default `None` costs two cheap `time.perf_counter()` calls either way;
+    step 1's own use of this function just doesn't pass a dict.
     """
+    t0 = time.perf_counter()
     model.fit(train_df[feature_cols], train_df["label"])
+    if timing is not None:
+        timing["fit_s"] = time.perf_counter() - t0
+
     history = _LazyHistory(train_df)
     n_updates = 0
 
+    t0 = time.perf_counter()
     test_preds = []
     for day, day_df in test_df.groupby("date", sort=True):
         pred_block = _predict_block(model, day_df, feature_cols)
@@ -90,4 +104,6 @@ def walk_forward_single_model(
         if len(sanity_df)
         else pd.DataFrame(columns=test_preds_df.columns)
     )
+    if timing is not None:
+        timing["predict_s"] = time.perf_counter() - t0
     return test_preds_df, sanity_preds_df, model, n_updates

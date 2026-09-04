@@ -34,7 +34,10 @@ MIN_FEATURES_ON: int = 2
 # and mutation treat them as a 2-element grid, which degenerates cleanly to
 # "pick either parent's value" / "resample", exactly as it should.
 GENE_GRIDS: dict[str, tuple[Any, ...]] = {
-    "model_family": ("logreg", "hgb"),
+    # "xgb" reuses the hgb_* genes below rather than adding a parallel
+    # xgb_* set -- see models/xgb_model.py's module docstring for the exact
+    # gene -> XGBoost-parameter mapping (and its two documented caveats).
+    "model_family": ("logreg", "hgb", "xgb"),
     "train_years_used": (1, 2, 3),
     "stagnant_bias": (-0.10, -0.05, 0.0, 0.05, 0.10),
     "lr_C": (0.01, 0.1, 1.0, 10.0),

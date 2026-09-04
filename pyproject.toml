@@ -18,6 +18,7 @@ dependencies = [
   "scipy>=1.11",
   "typer>=0.12",
   "matplotlib>=3.8",
+  "xgboost>=3.2.0",
 ]
 
 [project.optional-dependencies]

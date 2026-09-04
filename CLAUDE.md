@@ -146,7 +146,11 @@ wrapped around every `Parallel(...)` dispatch site
 (`evolution/loop.py`/`evolution/controls.py`): it caps each genome's own
 fit to one thread, so the outer `Parallel(n_jobs=...)` is the only source of
 parallelism. `threadpoolctl` ships as a scikit-learn dependency already, no
-new dependency added.
+new dependency added. The `"xgb"` model family (`models/xgb_model.py`) has
+the same failure mode via its own OpenMP thread pool, not necessarily one
+`threadpoolctl` controls -- its `XGBClassifier` is constructed with an
+explicit `n_jobs=1` for the same reason, rather than trusting
+`threadpool_limits` to catch it too.
 
 **Fitness-loop bootstrap cost.** Every genome's `FitnessResult` carries a
 block-bootstrap CI, but running step 1's `n_boot=2000` for every one of
