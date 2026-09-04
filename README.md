@@ -261,15 +261,29 @@ Every genome evaluation's timing (`fit` / `predict` / `metrics` /
 `predict` are the only two phases a device could ever touch; `metrics` and
 `bootstrap` are pure pandas/numpy on the resulting predictions and always
 run on CPU. On a `--quick` run (20 tickers, generation 0's 6 fresh
-evaluations, this machine's own GPU) fit+predict were ~99–100% of total
-per-genome cost both before and after, and adding `xgb` to the drawable
-grid — some of generation 0's random genomes landing on GPU-accelerated
-`xgb` — measurably dropped the average:
+evaluations, this machine's own GPU, no other load on the machine) adding
+`xgb` to the drawable grid — some of generation 0's random genomes landing
+on GPU-accelerated `xgb` — measurably dropped the average:
 
 | | fit | predict | metrics | bootstrap | total (avg/genome) |
 |---|---|---|---|---|---|
-| before (`logreg`/`hgb` only) | 10.888s (31%) | 23.745s (68%) | 0.143s (0%) | 0.040s (0%) | 34.816s |
-| after (`xgb` included, GPU auto-selected) | 10.122s (36%) | 18.095s (64%) | 0.132s (0%) | 0.031s (0%) | 28.380s |
+| before (`logreg`/`hgb` only) | 0.585s (47%) | 0.623s (50%) | 0.022s (2%) | 0.011s (1%) | 1.242s |
+| after (`xgb` included, GPU auto-selected) | 0.468s (68%) | 0.183s (27%) | 0.027s (4%) | 0.012s (2%) | 0.691s |
+
+**`predict`'s own cost dropped separately, for every model family, from a
+different change**: `walk_forward_single_model`'s Frozen policy (every
+genome uses it) used to predict its zone one day at a time — a leftover
+of the loop's general shape, needed for policies that update *during* the
+walk, which Frozen never does. It now predicts the whole zone in a single
+batched `predict_proba` call when the policy is `Frozen` (verified
+byte-identical to the old day-by-day output, same values *and* row order,
+in `test_walk_forward_batch.py`; the day-by-day path stays exactly as
+before for any future non-Frozen policy). On the arena zone's ~1,682
+trading days, that's one `predict_proba` call instead of ~1,682 of them:
+`predict`'s average dropped from **~18–24s to ~0.06–0.2s per genome** (the
+numbers above are already post-optimization) — a large enough win on its
+own that it's most of why the whole table above reads in seconds rather
+than tens of seconds.
 
 ### A bug the `--quick` run caught before it could waste a night
 

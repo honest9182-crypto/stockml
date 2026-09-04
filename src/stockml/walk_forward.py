@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 from stockml.models.base import predict_labels
-from stockml.update import UpdatePolicy
+from stockml.update import Frozen, UpdatePolicy
 
 
 class _LazyHistory:
@@ -55,15 +55,16 @@ def walk_forward_single_model(
     feature_cols: list[str],
     timing: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Any, int]:
-    """Fit on `train_df`, predict `test_df` one day at a time (so a real
-    update policy can slot in without restructuring this loop), then predict
-    `sanity_df` once with whatever model resulted -- no further updates.
+    """Fit on `train_df`, predict `test_df` (frozen: one batched call; any
+    other policy: one day at a time, so it can see each day's outcome and
+    decide whether to update -- see below), then predict `sanity_df` once
+    with whatever model resulted -- no further updates.
 
     `test_df` may be any single scored zone (step 1's test slice, or a
     genome's arena/vault zone) -- the function itself has no notion of
-    "test" beyond "the frame it predicts day by day and reports". Pass an
-    empty `sanity_df` (e.g. `test_df.iloc[0:0]`) when there's no sanity
-    slice to predict, as evolution's fitness evaluation does.
+    "test" beyond "the frame it predicts and reports". Pass an empty
+    `sanity_df` (e.g. `test_df.iloc[0:0]`) when there's no sanity slice to
+    predict, as evolution's fitness evaluation does.
 
     Pass a dict as `timing` to have `fit_s`/`predict_s` (wall-clock seconds)
     written into it -- e.g. evolution/fitness.py's per-genome timing
@@ -77,28 +78,47 @@ def walk_forward_single_model(
     if timing is not None:
         timing["fit_s"] = time.perf_counter() - t0
 
-    history = _LazyHistory(train_df)
-    n_updates = 0
-
     t0 = time.perf_counter()
-    test_preds = []
-    for day, day_df in test_df.groupby("date", sort=True):
-        pred_block = _predict_block(model, day_df, feature_cols)
-        test_preds.append(pred_block)
+    if isinstance(update_policy, Frozen):
+        # Frozen's should_update is always False, so the day-by-day walk
+        # below would do nothing but call predict_proba once per day and
+        # never update the model -- one batched predict_proba over the
+        # whole zone is exactly equivalent (see test_walk_forward_batch.py)
+        # and, for a many-day zone, considerably cheaper: no per-day
+        # DataFrame slicing/concatenation, and one call lets the underlying
+        # model batch its own work (a GPU model in particular). Sorting by
+        # date first (stable, so within-day order is untouched) makes the
+        # output byte-identical to the day-by-day path's row order, not
+        # just row-content-equivalent.
+        ordered = test_df.sort_values("date", kind="stable")
+        test_preds_df = (
+            _predict_block(model, ordered, feature_cols)
+            if len(ordered)
+            else pd.DataFrame(columns=["date", "ticker", "y_true", "y_pred", "p_down", "p_stagnant", "p_up"])
+        )
+        n_updates = 0
+    else:
+        history = _LazyHistory(train_df)
+        n_updates = 0
+        test_preds = []
+        for day, day_df in test_df.groupby("date", sort=True):
+            pred_block = _predict_block(model, day_df, feature_cols)
+            test_preds.append(pred_block)
 
-        history.append(day_df)
-        y_pred = pred_block["y_pred"].to_numpy()
-        y_true = pred_block["y_true"].to_numpy()
-        if update_policy.should_update(day, y_pred, y_true, history):
-            n_updates += 1
-            hist_df = history.to_frame()
-            model = update_policy.update(model, hist_df[feature_cols], hist_df["label"])
+            history.append(day_df)
+            y_pred = pred_block["y_pred"].to_numpy()
+            y_true = pred_block["y_true"].to_numpy()
+            if update_policy.should_update(day, y_pred, y_true, history):
+                n_updates += 1
+                hist_df = history.to_frame()
+                model = update_policy.update(model, hist_df[feature_cols], hist_df["label"])
 
-    test_preds_df = (
-        pd.concat(test_preds, ignore_index=True)
-        if test_preds
-        else pd.DataFrame(columns=["date", "ticker", "y_true", "y_pred", "p_down", "p_stagnant", "p_up"])
-    )
+        test_preds_df = (
+            pd.concat(test_preds, ignore_index=True)
+            if test_preds
+            else pd.DataFrame(columns=["date", "ticker", "y_true", "y_pred", "p_down", "p_stagnant", "p_up"])
+        )
+
     sanity_preds_df = (
         _predict_block(model, sanity_df, feature_cols)
         if len(sanity_df)
