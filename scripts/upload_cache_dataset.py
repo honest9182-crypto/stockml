@@ -39,6 +39,13 @@ Usage:
 
     # inspect what would be staged/run without touching Kaggle at all
     python scripts/upload_cache_dataset.py --kaggle-username YOURNAME --dry-run
+
+Known `kaggle` CLI quirk, observed directly uploading the full ~500-ticker
+universe: it can print "Upload successful" for every single file and then
+exit non-zero on a JSON-decode error in some final housekeeping call, even
+though the dataset was actually created/updated correctly. This script's
+own error message on that path tells you the exact `kaggle datasets files
+<id>` command to check before assuming the upload didn't happen.
 """
 
 from __future__ import annotations
@@ -165,10 +172,17 @@ def main() -> None:
     print(f"[upload_cache_dataset] dataset id: {dataset_id}")
 
     kaggle_prefix = _kaggle_cmd_prefix()
+    # -t/--keep-tabular: `kaggle datasets create`/`version` convert
+    # "tabular" files to CSV by default. Our parquet files were observed to
+    # survive an upload unconverted anyway (checked directly against the
+    # live dataset afterward), but there's no reason to rely on that --
+    # this is our price cache's actual source format, not something to let
+    # a CLI default silently reinterpret.
+    common_flags = ["-t"]
     if args.version:
-        cmd = kaggle_prefix + ["datasets", "version", "-p", str(staging_dir), "-m", args.version_notes]
+        cmd = kaggle_prefix + ["datasets", "version", "-p", str(staging_dir), "-m", args.version_notes] + common_flags
     else:
-        cmd = kaggle_prefix + ["datasets", "create", "-p", str(staging_dir)]
+        cmd = kaggle_prefix + ["datasets", "create", "-p", str(staging_dir)] + common_flags
         # `kaggle datasets create` is private by default -- this never adds
         # -u/--public, on purpose.
 
@@ -178,7 +192,22 @@ def main() -> None:
               "then re-run without --dry-run (or copy/paste the command).")
         return
 
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError:
+        # Observed directly: for a large (500+ file) dataset, the kaggle
+        # CLI can print "Upload successful" for every single file, then
+        # exit non-zero on a JSON-decode error in some final housekeeping
+        # call, even though the dataset was actually created/updated
+        # correctly (verified with `kaggle datasets files <id>` after this
+        # happened -- every file was present). Don't assume this failure
+        # means nothing happened; check before retrying.
+        print(
+            f"\n[upload_cache_dataset] kaggle exited non-zero. This can happen even when the "
+            f"upload actually succeeded (seen with large datasets) -- verify before retrying:\n"
+            f"  kaggle datasets files {dataset_id}\n"
+        )
+        raise
 
 
 if __name__ == "__main__":
