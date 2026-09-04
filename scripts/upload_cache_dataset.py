@@ -47,9 +47,22 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _kaggle_cmd_prefix() -> list[str]:
+    """The `kaggle` console script isn't guaranteed to be on PATH (e.g. it's
+    only on a different Python installation's Scripts/bin dir than the one
+    running this script) -- prefer it when it is (`shutil.which`), otherwise
+    fall back to `python -m kaggle` under *this* interpreter, which works
+    as long as `kaggle` is installed wherever this script is being run
+    from (`pip install kaggle`).
+    """
+    found = shutil.which("kaggle")
+    return [found] if found else [sys.executable, "-m", "kaggle"]
 DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "cache"
 DEFAULT_TICKERS_CSV = REPO_ROOT / "data" / "tickers" / "sp500.csv"
 DEFAULT_STAGING_DIR = REPO_ROOT / "kaggle" / ".dataset_staging"
@@ -151,10 +164,11 @@ def main() -> None:
     print(f"[upload_cache_dataset] staged {n_parquet} parquet files + {args.tickers_csv.name} -> {staging_dir}")
     print(f"[upload_cache_dataset] dataset id: {dataset_id}")
 
+    kaggle_prefix = _kaggle_cmd_prefix()
     if args.version:
-        cmd = ["kaggle", "datasets", "version", "-p", str(staging_dir), "-m", args.version_notes]
+        cmd = kaggle_prefix + ["datasets", "version", "-p", str(staging_dir), "-m", args.version_notes]
     else:
-        cmd = ["kaggle", "datasets", "create", "-p", str(staging_dir)]
+        cmd = kaggle_prefix + ["datasets", "create", "-p", str(staging_dir)]
         # `kaggle datasets create` is private by default -- this never adds
         # -u/--public, on purpose.
 
