@@ -285,15 +285,31 @@ def fetch_run(
     """
     import shutil
     import subprocess
+    import sys
 
     runs_path = Path(runs_dir)
     slug = kernel_ref.replace("/", "_")
     raw_dest = runs_path / "kernel_output" / slug
     raw_dest.mkdir(parents=True, exist_ok=True)
 
-    cmd = ["kaggle", "kernels", "output", kernel_ref, "-p", str(raw_dest)]
+    # shutil.which first (in case the console script is on PATH), else fall
+    # back to `python -m kaggle` under this interpreter -- same reasoning as
+    # scripts/upload_cache_dataset.py's _kaggle_cmd_prefix.
+    kaggle_bin = shutil.which("kaggle")
+    kaggle_prefix = [kaggle_bin] if kaggle_bin else [sys.executable, "-m", "kaggle"]
+    cmd = kaggle_prefix + ["kernels", "output", kernel_ref, "-p", str(raw_dest)]
     typer.echo(f"[fetch-run] {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError:
+        # Observed directly (see scripts/upload_cache_dataset.py's matching
+        # note): for a large output, the kaggle CLI can print every file as
+        # downloaded and still exit non-zero on some final housekeeping
+        # call. Don't bail here -- check what actually landed below instead.
+        typer.echo(
+            "[fetch-run][WARN] kaggle exited non-zero -- this can happen even when the download "
+            "actually completed. Checking what was downloaded before giving up."
+        )
 
     nested_runs = raw_dest / "runs"
     landed = []
