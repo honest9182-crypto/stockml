@@ -9,7 +9,7 @@
   "enable_tpu": "false",
   "enable_internet": "true",
   "machine_shape": "",
-  "dataset_sources": ["honesttt/stockml-price-cache"],
+  "dataset_sources": ["honesttt/stockml-price-cache", "honesttt/stockml-run-evo-20260904-204410-evo"],
   "competition_sources": [],
   "kernel_sources": [],
   "model_sources": []
