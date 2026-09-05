@@ -319,6 +319,14 @@ exactly what makes splitting a run across sessions lossless: a session that
 gets killed mid-generation loses at most the generation in progress, never
 anything already written.
 
+**Two shortcut stages** (added after the batched-predict optimisation brought a
+full evolution down to roughly 3 hours on a Kaggle CPU session): `STAGE = "full"`
+runs evolve, then the random-search control, then the null control, all in one
+session (~9 hours, inside the 12-hour cap with margin), and `STAGE = "controls"`
+runs both controls back to back against an attached, already-completed run.
+Nothing changes about what each stage does; they just run in succession so no
+PC has to stay on between them. Only the vault stays local.
+
 **The chaining order**, each step a separate Kaggle notebook session (via
 `kaggle/stage.ipynb`, described below):
 
