@@ -172,7 +172,7 @@ def block_bootstrap_ci(
     the row-level binomial test overstates significance.
     """
     n = len(x)
-    if n == 0:
+    if n == 0 or n_boot <= 0:
         return (float("nan"), float("nan"))
     rng = np.random.default_rng(seed)
     n_blocks = int(np.ceil(n / block_size))
@@ -184,6 +184,49 @@ def block_bootstrap_ci(
         boot_means[b] = sample.mean()
     lo, hi = np.percentile(boot_means, [(1 - ci) / 2 * 100, (1 + ci) / 2 * 100])
     return float(lo), float(hi)
+
+
+def summarize_daily_series(
+    edge: pd.Series, block_size: int = 20, n_boot: int = 2000, seed: int = 0
+) -> dict[str, Any]:
+    """The shared "one number per trading day" significance summary: mean
+    edge (percentage points), its standard error, a one-sided paired t-test
+    against zero, and a 20-day block-bootstrap 95% CI. `edge` is whatever
+    daily series the caller has already reduced its comparison to -- model
+    accuracy minus baseline accuracy for `day_level_paired_test` below, or
+    the picker's precision-minus-base-rate edge (`picker/evaluate.py`).
+    Both are "one number per trading day, not per row" (CLAUDE.md's
+    day-level-vs-row-level section) and share this exact treatment so they
+    can never quietly diverge in how they're judged.
+    """
+    edge = edge.dropna()
+    if len(edge) < 2:
+        return {
+            "n_days": int(len(edge)),
+            "mean_edge_pp": float(edge.mean() * 100) if len(edge) else 0.0,
+            "se_pp": 0.0,
+            "t_stat": float("nan"),
+            "p_value": float("nan"),
+            "ci95_low_pp": float("nan"),
+            "ci95_high_pp": float("nan"),
+            "block_size": block_size,
+        }
+
+    edge_arr = edge.to_numpy()
+    n = len(edge_arr)
+    se_pp = float(edge_arr.std(ddof=1) / np.sqrt(n)) * 100
+    t_stat, p_value = ttest_1samp(edge_arr, popmean=0.0, alternative="greater")
+    ci_low, ci_high = block_bootstrap_ci(edge_arr, block_size=block_size, n_boot=n_boot, seed=seed)
+    return {
+        "n_days": int(n),
+        "mean_edge_pp": float(edge.mean() * 100),
+        "se_pp": se_pp,
+        "t_stat": float(t_stat),
+        "p_value": float(p_value),
+        "ci95_low_pp": float(ci_low * 100),
+        "ci95_high_pp": float(ci_high * 100),
+        "block_size": block_size,
+    }
 
 
 def day_level_paired_test(
@@ -201,38 +244,13 @@ def day_level_paired_test(
     version overstates significance).
 
     For each trading day, computes (model's pooled accuracy that day) minus
-    (baseline's pooled accuracy that day) -- one number per day. Reports the
-    mean of that daily edge (in percentage points), a one-sided paired
-    t-test of whether it's greater than zero, and a 20-day block-bootstrap
-    95% CI that respects day-to-day autocorrelation.
+    (baseline's pooled accuracy that day) -- one number per day -- and
+    hands it to `summarize_daily_series` for the mean/t-test/CI.
     """
     model_daily = daily_accuracy(date, y_true, y_pred_model)
     baseline_daily = daily_accuracy(date, y_true, y_pred_baseline)
     edge = (model_daily - baseline_daily).dropna()
-
-    if len(edge) < 2:
-        return {
-            "n_days": int(len(edge)),
-            "mean_edge_pp": float(edge.mean() * 100) if len(edge) else 0.0,
-            "t_stat": float("nan"),
-            "p_value": float("nan"),
-            "ci95_low_pp": float("nan"),
-            "ci95_high_pp": float("nan"),
-            "block_size": block_size,
-        }
-
-    edge_arr = edge.to_numpy()
-    t_stat, p_value = ttest_1samp(edge_arr, popmean=0.0, alternative="greater")
-    ci_low, ci_high = block_bootstrap_ci(edge_arr, block_size=block_size, n_boot=n_boot, seed=seed)
-    return {
-        "n_days": int(len(edge)),
-        "mean_edge_pp": float(edge.mean() * 100),
-        "t_stat": float(t_stat),
-        "p_value": float(p_value),
-        "ci95_low_pp": float(ci_low * 100),
-        "ci95_high_pp": float(ci_high * 100),
-        "block_size": block_size,
-    }
+    return summarize_daily_series(edge, block_size=block_size, n_boot=n_boot, seed=seed)
 
 
 def yearly_edge_table(

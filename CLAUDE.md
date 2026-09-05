@@ -167,6 +167,82 @@ its id, generation, genome, parents, which genes mutated, and whether it
 came from a storm, the lottery, or immigration. Any champion is traceable
 back to generation 0 (`stockml lineage ... --id <individual>`).
 
+## Up-only picker (step 1.6)
+
+`src/stockml/picker/` reframes the question: not "what will this stock do
+tomorrow" but **"which stocks are most likely to be up tomorrow"** -- a
+ranking problem. A picker is a decision rule that is **forced to name
+exactly `n_picks` tickers "up" every day** (never fewer, never more, never
+"down"/"stagnant" -- all it decides is *which*). This isn't a new
+behaviour bolted on; it's what the step-1/1.5 models already lean toward
+(the evolution champion says "stagnant" 85-91% of the time) made into the
+design. Default `n_picks = 10` (~2% of the universe): one pick is
+all-or-nothing per day, fifty is barely more than an index tilt, ten is a
+buy-list a person could act on and gives real precision granularity.
+`n_picks` lives in config and the report always sweeps it (`k_sweep.csv`),
+so the choice stays visible, not baked in.
+
+**The score is judged against the day's own base rate, not a fixed
+threshold.** On day `d`: `precision_d` = share of the day's picks whose true
+label is `up`; `base_d` = share of *every* ticker with a row that day whose
+label is `up` (exactly the expected precision of `n_picks` random picks
+that day). `edge_d = precision_d - base_d`. On a day the whole market jumps,
+every pick looks right, and so does every random one -- the paired edge is
+what's left. This is the exact same day-level-not-row-level idea as the
+step-1 significance test above, generalized: `evaluate.summarize_daily_series`
+is the shared "mean edge, one-sided t-test, 20-day block-bootstrap CI"
+helper both `day_level_paired_test` and the picker's edge reduce to, so the
+two can never quietly diverge in how they're judged.
+
+**Volatility is not a signal.** The label band is `k*sigma`, so a volatile
+stock crosses it more often in *both* directions -- a picker can beat
+`base_d` by chasing volatile names while knowing nothing about direction.
+Every report shows the picks' down-rate next to their up-rate, and
+`top_vol` (picks = highest trailing sigma) is the baseline a picker
+actually has to clear, not just `random`.
+
+**Two ways to get the per-row score `p_up`** (`picker/scores.py`),
+selectable in config as `score_source`: `three_class` reuses the existing
+`logreg`/`hgb`/`xgb` model classes completely unchanged and reads the
+`p_up` column `walk_forward_single_model` already produces -- free, and it
+means any step-1 model or evolution genome can be scored as a picker with
+no new fitting. `binary` collapses the label to up/not-up and fits the
+same model classes on that instead (a model trained only to separate up
+from not-up may rank better than one asked to also tell down from
+stagnant). The not-up mass is reported as `p_stagnant`, never `p_down` --
+`BinaryUp` never claims to know about *down* moves, only *not-up* ones, so
+saying otherwise would overstate what a binary-trained model actually
+learned. Implemented by fitting the wrapped model on the label collapsed to
+`{up, stagnant}` (never a new label value) so every model family
+(`XGB` included, whose sklearn API only accepts `CLASS_ORDER` values)
+handles it via the exact same `reorder_proba` path with no special-casing.
+
+**Leak alarm, picker-flavoured.** Random picks run near 30% precision here
+(roughly `n_picks`/universe-size of it *is* base rate); a picker sitting
+at 45% next-day precision is not a discovery. If any picker's mean edge
+exceeds **+15 points** over more than 250 days, print the warning and run
+the existing leak diagnostics (`evaluate.run_leak_diagnostics`, unchanged)
+before trusting the number -- `evaluate.check_leak_alarm` already compares
+"a value against a threshold over enough days" generically enough to reuse
+verbatim, just fed percentage points instead of raw accuracy.
+
+**Baselines, same days, same `n_picks`, mandatory** (`picker/baselines.py`):
+`random` (200 seeds' worth of uniformly-random `n_picks`, reported as the
+2.5th/97.5th-percentile luck band every picker must clear), `top_vol` (the
+real bar -- see above), `momentum`/`reversal` (yesterday's winners/losers),
+`frequent` (the training window's highest historical up-rate tickers, a
+static list). A picker number without all five next to it is not a result,
+same as CLAUDE.md principle 2 one level up.
+
+**Evolution-ready, not evolution-wired.** `evaluate_picker(scores_df,
+zone_days, n_picks, seed, n_boot) -> PickerResult` has the same shape as
+`FitnessResult` (mean edge, SE, `fitness = mean_edge_pp - se_pp`, CI,
+n_days, hit mix) specifically so `evolution/fitness.py` can later add
+`fitness_kind: picker` with `n_picks`/`score_source` as genes without
+restructuring anything -- not built or wired in this step. Cross-sectional
+features (e.g. rank-within-day of an existing feature) are the obvious
+first extension once that happens; not added now either.
+
 ## Repo layout
 
 ```

@@ -259,6 +259,38 @@ def evo_report(
 
 
 # ---------------------------------------------------------------------------
+# Up-only picker (step 1.6)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def pick(
+    config: str = typer.Option(..., "--config", help="Path to a picker config YAML."),
+) -> None:
+    """Run the up-only picker walk-forward and write runs/<ts>_<name>/."""
+    from stockml.picker.run import run as pick_run
+
+    run_dir = pick_run(config)
+    typer.echo(f"[pick] done -> {run_dir}")
+
+
+@app.command(name="pick-report")
+def pick_report(
+    run_dir: str = typer.Argument(..., help="Path to a runs/<ts>_<name>/ directory from `stockml pick`."),
+) -> None:
+    """Re-print a completed picker run's report.txt (table, baselines, sweep, warnings)."""
+    p = Path(run_dir)
+    report_path = p / "report.txt"
+    if not report_path.exists():
+        typer.echo(f"no report.txt found in {p}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(report_path.read_text(encoding="utf-8"))
+    leak_path = p / "leak_report.json"
+    if leak_path.exists():
+        typer.echo(f"[pick-report] leak diagnostics were run for this run -- see {leak_path}")
+
+
+# ---------------------------------------------------------------------------
 # Kaggle (see README's "Running on Kaggle")
 # ---------------------------------------------------------------------------
 

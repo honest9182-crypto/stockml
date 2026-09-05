@@ -38,13 +38,18 @@ uv run stockml evo-report        runs/evo_<ts>_<name>/
 # running evolve on Kaggle (see "Running on Kaggle" below)
 uv run stockml fetch-run <kernel-ref>   # pull a Kaggle notebook's run output into runs/
 
+# step 1.6: up-only picker (see below)
+uv run stockml pick        --config configs/picker.yaml   # walk-forward, writes runs/<ts>_<name>/
+uv run stockml pick-report runs/<ts>_<name>/                # re-print the table, baselines, sweep, warnings
+
 uv run pytest -q
 ```
 
 Use `configs/smoke.yaml` (10 tickers, ~2 years) for fast step-1 iteration,
-and `evolve --quick` (20 tickers, 6 genomes, 3 generations) for fast
-evolution iteration — both run in well under a minute per generation once
-prices are cached.
+`evolve --quick` (20 tickers, 6 genomes, 3 generations) for fast evolution
+iteration, and `configs/picker_smoke.yaml` (10 tickers, `n_picks: 2`) for
+fast picker iteration — all run in well under a minute once prices are
+cached.
 
 ## How the pipeline fits together
 
@@ -58,6 +63,7 @@ models/         Model protocol; MajorityClass/AlwaysUp baselines; LogReg/HGB (bo
 update.py       UpdatePolicy protocol + Frozen (step-2 hook; the loop calls it every test day)
 evaluate.py     metrics, per-ticker/per-class breakdowns, day-level significance test, leak diagnostics
 evolution/      step 1.5: genetic search over (features x model x hyperparams) genomes -- see below
+picker/         step 1.6: forced-n_picks up-only ranking, judged against the day's own base rate -- see below
 run.py          orchestrates step 1, writes runs/<ts>_<name>/
 backtest/       Policy + Reward protocol stubs only (step-3 hook)
 ```
@@ -296,6 +302,95 @@ genomes: ~3.3 min serial vs. not finishing in 10 min "parallel"). Fixed with
 already a scikit-learn dependency, no new one added. This is exactly why
 `--quick` exists: catching this on a 3-minute run instead of during a
 population-40/generations-25/full-S&P-500 overnight run.
+
+## Step 1.6: up-only picker
+
+`src/stockml/picker/` reframes step 1's question. Not "what will this stock
+do tomorrow" but **"which stocks are most likely to be up tomorrow"** — a
+ranking problem. A picker is forced to name exactly `n_picks` tickers "up"
+every day (never fewer, never more, never "down"/"stagnant" — the only
+decision is *which*). Full design rationale is in `CLAUDE.md`'s "Up-only
+picker (step 1.6)" section. Short version:
+
+- **Judged against the day's own base rate, not a fixed threshold.**
+  `edge_d = precision_d − base_d`, where `base_d` is the share of *every*
+  ticker with a row that day whose true label is `up` — exactly what
+  picking `n_picks` at random would get right by chance. `evaluate.
+  summarize_daily_series` is the exact same mean/t-test/block-bootstrap-CI
+  machinery `day_level_paired_test` already used, refactored out so the two
+  can never quietly diverge in how a daily edge gets judged.
+- **Volatility is not a signal.** `top_vol` (picks = highest trailing
+  sigma) is the real bar, not `random` — a picker that just chases volatile
+  names can beat random without knowing anything about direction.
+- **Two ways to score:** `three_class` reuses the existing `logreg`/`hgb`/
+  `xgb` models completely unchanged; `binary` fits the same model classes
+  on the label collapsed to up/not-up instead (`BinaryUp`), reporting the
+  not-up mass as `p_stagnant`, never `p_down` — it was never asked to
+  separate down from stagnant, so claiming to know the difference would
+  overstate what it learned.
+- **Five mandatory baselines, same days, same `n_picks`:** `random` (the
+  luck band — 200 seeds' worth), `top_vol`, `momentum`, `reversal`,
+  `frequent` (a static list from the training window's own up-rates). A
+  picker number without all five next to it is not a result.
+- **`n_picks = 10` by default** (~2% of the universe) — one pick is
+  all-or-nothing per day, fifty is barely more than an index tilt, ten is a
+  buy-list a person could act on. The report always sweeps `k_sweep`
+  (`k_sweep.csv`/`k_sweep.png`) so the choice stays visible, not baked in:
+  real ranking skill shows up as an edge that *rises* as `k` shrinks; noise
+  shows up flat.
+- **Leak alarm at +15 points**, not step 1's 60% accuracy — random picks
+  already run near the universe's own base rate here, so the failure mode
+  a fixed accuracy threshold catches doesn't apply the same way.
+
+### Results: full S&P 500, `configs/picker.yaml`
+
+`n_picks=10`, `score_source=binary`, same 2010→today window and 3-year
+train/test split as step 1's own full run (493 tickers, 3,347 test days).
+Run: `runs/20260905_140720_picker/`. No leak alarm fired (largest edge
+~4.2pp, nowhere near the +15pp threshold).
+
+```
+random baseline (luck band, 200 draws): mean=-0.017pp  95% band=[-0.442, +0.402]pp
+
+picker/baseline results (mean precision vs. mean base rate; edge = the difference):
+  logreg       precision=0.3220 base_rate=0.3032 mean_edge=+1.886pp  95%CI=[+1.225,+2.516]pp  [beats top_vol] [beats random band]
+  hgb          precision=0.3454 base_rate=0.3032 mean_edge=+4.222pp  95%CI=[+3.589,+4.872]pp  [beats top_vol] [beats random band]
+  xgb          precision=0.3419 base_rate=0.3032 mean_edge=+3.870pp  95%CI=[+3.294,+4.509]pp  [beats top_vol] [beats random band]
+  top_vol      precision=0.1990 base_rate=0.3032 mean_edge=-10.418pp 95%CI=[-11.195,-9.715]pp
+  momentum     precision=0.2811 base_rate=0.3032 mean_edge=-2.210pp  95%CI=[-2.844,-1.650]pp   [beats top_vol]
+  reversal     precision=0.3029 base_rate=0.3032 mean_edge=-0.023pp  95%CI=[-0.639,+0.553]pp    [beats top_vol]
+  frequent     precision=0.3090 base_rate=0.3032 mean_edge=+0.586pp  95%CI=[+0.007,+1.142]pp    [beats top_vol]
+
+return check (secondary, bp): hgb +5.81bp (p=0.0003), xgb +3.35bp (p=0.022) --
+corroborate the precision edge; logreg +1.05bp (p=0.29) doesn't, despite
+clearing the precision bar -- worth knowing, not papered over.
+
+concentration: logreg/hgb/xgb each touch all 493 tickers over the run
+(top-10 share 4.6-5.8%) -- the edge isn't a static short list. `frequent`
+is n_distinct=10/top10_share=1.0 by construction (it *is* a static list).
+`top_vol` sits at n_distinct=309, top10_share=24.3% -- volatility is far
+more persistent per-ticker than genuine next-day rank is.
+
+n_picks sweep (hgb): k=1:+1.86pp k=5:+3.66pp k=10:+4.22pp k=25:+4.33pp
+k=50:+3.93pp k=100:+3.50pp -- rises from k=100 down to a peak around
+k=10-25, then *drops* at k=1. Real structure, not oracle-clean monotonicity:
+a single pick has the highest variance of any k, and noise dominates there
+even when the ranking itself is genuinely informative in aggregate.
+```
+
+**Reading this honestly**: `hgb` and `xgb` clear every bar at `n_picks=10` --
+`top_vol` (the real one, not `random`), the random luck band, and each
+other's near-overlapping CIs suggest the signal is coming from the
+model family, not a particular hyperparameter fluke. `top_vol` being
+*strongly negative* (-10.4pp) is itself informative, not a bug: a wider
+`k·sigma` band for a volatile stock makes "stagnant" more likely at any
+given move size, not "up" specifically -- exactly CLAUDE.md's "volatility
+is not a signal" caveat, borne out rather than just asserted. `logreg`
+clearing precision but not the return check is the kind of result the
+report is built to surface plainly rather than average away: a modest,
+real-looking edge on one axis that a second, differently-constructed check
+doesn't confirm. See `runs/20260905_140720_picker/report.txt` for the full
+per-year table, hit mix, and every baseline's own sweep.
 
 ## Running on Kaggle
 

@@ -1,0 +1,37 @@
+# Fast config for tests and quick iteration: 10 tickers, ~2 years, n_picks=2,
+# a small random_draws -- must run in under a minute.
+name: picker_smoke
+seed: 0
+
+universe:
+  tickers: [AAPL, MSFT, AMZN, GOOGL, JPM, XOM, JNJ, PG, KO, WMT]
+
+data:
+  start: "2024-09-01"
+  end: null            # null = today
+  cache_dir: data/cache
+  min_history_days: 300
+
+labels:
+  k: 0.5
+  vol_window: 20
+
+split:
+  train_years: 1
+  sanity_days: 10
+  embargo_days: 1
+
+n_picks: 2
+k_sweep: [1, 2, 5, 10]
+score_source: binary
+models:
+  - logreg
+  - hgb
+  - xgb
+random_draws: 20
+
+leak_alarm:
+  edge_threshold_pp: 15
+  min_days: 250
+
+runs_dir: runs

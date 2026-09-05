@@ -1,0 +1,38 @@
+# Default up-only picker run: full S&P 500, 2010 -> today. Same shape as
+# configs/step1.yaml, plus the picker's own fields -- see CLAUDE.md's
+# "Up-only picker (step 1.6)" section.
+name: picker
+seed: 0
+
+universe:
+  csv: data/tickers/sp500.csv
+
+data:
+  start: "2010-01-01"
+  end: null           # null = today
+  cache_dir: data/cache
+  min_history_days: 1000
+
+labels:
+  k: 0.5
+  vol_window: 20
+
+split:
+  train_years: 3
+  sanity_days: 10
+  embargo_days: 1   # drop the last training day: its label uses the first test day's close
+
+n_picks: 10
+k_sweep: [1, 5, 10, 25, 50, 100]
+score_source: binary   # "three_class" | "binary" -- see CLAUDE.md
+models:
+  - logreg
+  - hgb
+  - xgb
+random_draws: 200
+
+leak_alarm:
+  edge_threshold_pp: 15
+  min_days: 250
+
+runs_dir: runs

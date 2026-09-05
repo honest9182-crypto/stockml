@@ -30,8 +30,6 @@ import pandas as pd
 
 from stockml.models.base import CLASS_ORDER, reorder_proba
 
-_LABEL_TO_IDX = {c: i for i, c in enumerate(CLASS_ORDER)}
-
 
 class XGB:
     """XGBoost gradient boosting, `tree_method="hist"`. `device` is decided
@@ -76,14 +74,24 @@ class XGB:
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "XGB":
         # Unlike sklearn's own estimators (LogReg/HGB), XGBoost's sklearn API
-        # rejects arbitrary string labels for multiclass -- it requires
-        # 0..n_classes-1 integers matching its inferred class count. Encode
-        # against CLASS_ORDER (not a fresh LabelEncoder) so the mapping is
-        # fixed and reproducible regardless of which classes this genome's
-        # training window happens to contain.
-        y_idx = y.map(_LABEL_TO_IDX)
+        # rejects arbitrary string labels -- it requires labels to be
+        # contiguous integers starting at 0 for however many classes are
+        # actually present, not just "valid CLASS_ORDER values". Encoding
+        # against the *full* CLASS_ORDER (fixed {down:0, stagnant:1, up:2})
+        # breaks the moment fewer than three classes are present -- e.g.
+        # picker.scores.BinaryUp fits on {stagnant, up} only, which maps to
+        # {1, 2}, not the {0, 1} XGBoost's binary path demands (observed
+        # directly: "Invalid classes inferred... Expected: [0 1], got [1
+        # 2]"). Encode only the classes present in *this* y instead, kept in
+        # CLASS_ORDER's relative order (not y's encounter order) so the
+        # mapping is still fixed and reproducible regardless of row order --
+        # for the normal all-three-classes case this is identical to the
+        # old fixed mapping, so nothing changes there.
+        present = [c for c in CLASS_ORDER if c in set(y)]
+        label_to_idx = {c: i for i, c in enumerate(present)}
+        y_idx = y.map(label_to_idx)
         self._clf.fit(X, y_idx)
-        self.classes_ = [CLASS_ORDER[i] for i in self._clf.classes_]
+        self.classes_ = [present[i] for i in self._clf.classes_]
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
